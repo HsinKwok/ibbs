@@ -1,0 +1,91 @@
+:root {
+    /* site 设计 tokens */
+    --color-primary: #5b8c5a;
+    --color-primary-dark: #4a8b5f;
+    --color-primary-light: #7cb879;
+    --color-primary-soft: #e8f5ec;
+    --color-primary-soft2: #d4edda;
+    --color-primary-soft3: #c3e6cb;
+    --color-primary-gradient-end: #6ba869;
+    --color-primary-rgb: 91, 140, 90;
+    --color-primary-light-rgb: 124, 184, 121;
+    --color-yellow: #ffc107;
+    --color-yellow-dark: #e6ac00;
+    --color-text: #333;
+    --color-text-light: #666;
+    --color-border: #e8e8e8;
+    --color-bg: #f5f6f8;
+    --color-white: #fff;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, .08);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, .1);
+    --radius: 12px;
+    --header-h: 64px;
+    --top-gap: 16px;
+    --layout-gap: 16px;
+    --sidebar-left-w: 256px;
+    --sidebar-right-w: 310px;
+    --max-content: 810px;
+    --border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+*,
+::before,
+::after {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: var(--kh-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif);
+    font-size: var(--kh-font-size-base, 14px);
+    color: var(--color-text);
+    background: var(--color-bg);
+    line-height: 1.5;
+}
+
+a {
+    text-decoration: none;
+    color: inherit;
+}
+
+ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+button {
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    background: none;
+}
+
+.page-enter-active, .page-leave-active {
+  transition: all 0.3s ease;
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.page-enter-to {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-20px);
+}
+
+/* 隐藏内容为空的卡片容器（如推广卡片被后台隐藏时） */
+.NavBar:empty {
+  display: none;
+}

@@ -1,0 +1,317 @@
+/*
+ * 分类页（板块 plate / 话题 topic）共享布局样式。
+ * 用法（在 <style lang="scss" scoped> 顶部）：
+ *   @use '../../../assets/scss/category-page' as *;
+ *   @include category-page-layout($left-padding: 10px 0 20px);
+ *
+ * 可选参数仅用于两页真实存在的差异，默认值为无差异一侧：
+ *   $mobile-padding-top 移动端主容器顶部内边距（板块页为 70px）
+ *   $mobile-box-width   移动端主容器宽度（板块页为 calc(100% - 20px)）
+ *   $left-padding       桌面端左栏内边距（话题页为 10px 0 20px）
+ */
+@mixin category-page-layout($mobile-padding-top: 0, $mobile-box-width: 100%, $left-padding: 0) {
+
+    /* 视口大于768px时的样式 */
+    @media (min-width: 768px) {
+        .MainBox {
+            width: calc(100% - 20px);
+            max-width: 1280px;
+            margin: 0 auto;
+            display: flex;
+            height: 100%;
+            padding: 20px 0 20px;
+
+            .Left {
+                width: calc(100% - 300px);
+                margin: 0 auto;
+                overflow-y: auto;
+                padding: $left-padding;
+
+                /* 隐藏滚动条 */
+                &::-webkit-scrollbar {
+                    display: none;
+                }
+
+                .threads {
+                    border-radius: 10px;
+                    margin-bottom: 10px;
+
+                    .content-box {
+                        width: calc(100%);
+                        margin-top: 10px;
+                        column-count: 2;
+                        column-gap: 8px;
+
+                        :deep(.Itemlist) {
+                            break-inside: avoid;
+                            margin-bottom: 8px;
+                            padding: 8px;
+
+                            .UserInfo {
+                                .UserDetail {
+                                    padding-top: 4px;
+                                }
+                            }
+
+                            .Content {
+                                .PostContent {
+                                    margin-top: 6px;
+
+                                    .word {
+                                        margin-top: 6px;
+                                    }
+                                }
+
+                                .ImageList {
+                                    margin-top: 6px;
+                                }
+
+                                .PostActions {
+                                    margin-top: 8px;
+                                }
+
+                                .Interactions {
+                                    margin-top: 6px;
+                                    margin-bottom: 0;
+                                }
+                            }
+                        }
+                    }
+
+                    .PageNav {
+                        width: calc(100%);
+                        margin-top: 12px;
+                        display: flex;
+                        padding: 8px;
+                        border-radius: 10px;
+                        background-color: #fff;
+                        justify-content: center;
+                    }
+                }
+
+                .NavLisbox {
+                    padding: 10px 20px;
+                    background-color: #fff;
+                    border-radius: 10px;
+                    margin-bottom: 12px;
+                    white-space: nowrap;
+                    overflow-x: auto;
+
+                    .Item {
+                        display: inline-block;
+                        line-height: 30px;
+                        padding: 10px 0;
+                        cursor: pointer;
+                        color: #888888;
+                        margin-right: 20px;
+
+                        .icon {
+                            width: 17px;
+                            height: 17px;
+                            margin-right: 10px;
+                            display: inline-block;
+                            margin-top: 6.5px;
+                        }
+                    }
+
+                    .active {
+                        color: var(--color-primary);
+                        position: relative;
+
+                        &::after {
+                            content: '';
+                            position: absolute;
+                            left: 15px;
+                            bottom: 1px;
+                            width: calc(100% - 30px);
+                            height: 5px;
+
+                            background-color: var(--color-primary);
+                        }
+
+                        p {
+                            color: var(--color-primary);
+                        }
+                    }
+                }
+            }
+
+            .Right {
+                margin-left: 10px;
+                width: var(--sidebar-right-w);
+
+                .NavBar {
+                    width: calc(100% - 20px);
+                    padding: 8px;
+                    border-radius: 10px;
+                    background-color: #fff;
+
+                    .Item {
+                        width: calc(100% - 20px);
+                        padding: 10px 0;
+                        cursor: pointer;
+
+                        p {
+                            font-size: 16px;
+                            color: #333;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 视口小于768px时的样式 */
+    @media (max-width: 768px) {
+        .MainBox {
+            width: $mobile-box-width;
+            height: 100%;
+            padding-top: $mobile-padding-top;
+            margin: 0 auto;
+
+            .Left {
+                width: calc(100%);
+                margin: 0 auto;
+                overflow-y: auto;
+
+                /* 隐藏滚动条 */
+                &::-webkit-scrollbar {
+                    display: none;
+                }
+
+                .threads {
+                    border-radius: 10px;
+                    margin-bottom: 10px;
+
+                    .content-box {
+                        width: calc(100%);
+                        margin-top: 10px;
+                        column-count: 1;
+                        column-gap: 8px;
+
+                        :deep(.Itemlist) {
+                            break-inside: avoid;
+                            margin-bottom: 8px;
+                            padding: 8px;
+
+                            .UserInfo {
+                                .UserDetail {
+                                    padding-top: 4px;
+                                }
+                            }
+
+                            .Content {
+                                .PostContent {
+                                    margin-top: 6px;
+
+                                    .word {
+                                        margin-top: 6px;
+                                    }
+                                }
+
+                                .ImageList {
+                                    margin-top: 6px;
+                                }
+
+                                .PostActions {
+                                    margin-top: 8px;
+                                }
+
+                                .Interactions {
+                                    margin-top: 6px;
+                                    margin-bottom: 0;
+                                }
+                            }
+                        }
+                    }
+
+                    .PageNav {
+                        width: calc(100%);
+                        margin-top: 12px;
+                        display: flex;
+                        padding: 8px;
+                        border-radius: 10px;
+                        background-color: #fff;
+                        justify-content: center;
+                    }
+                }
+
+                .NavLisbox {
+                    padding: 10px 20px;
+                    background-color: #fff;
+                    border-radius: 10px;
+                    margin-bottom: 12px;
+                    white-space: nowrap;
+                    overflow-x: auto;
+
+                    .Item {
+                        display: inline-block;
+                        line-height: 30px;
+                        padding: 10px 0;
+                        cursor: pointer;
+                        color: #888888;
+                        margin-right: 20px;
+
+                        .icon {
+                            width: 17px;
+                            height: 17px;
+                            margin-right: 10px;
+                            display: inline-block;
+                            margin-top: 6.5px;
+                        }
+                    }
+
+                    .active {
+                        color: var(--color-primary);
+                        position: relative;
+
+                        &::after {
+                            content: '';
+                            position: absolute;
+                            left: 15px;
+                            bottom: 1px;
+                            width: calc(100% - 30px);
+                            height: 5px;
+
+                            background-color: var(--color-primary);
+                        }
+
+                        p {
+                            color: var(--color-primary);
+                        }
+                    }
+                }
+            }
+
+            .Right {
+                width: 100%;
+
+                .NavBar {
+                    width: calc(100% - 20px);
+                    padding: 8px;
+                    border-radius: 10px;
+                    background-color: #fff;
+                    margin-top: 10px;
+
+                    .Item {
+                        width: calc(100% - 20px);
+                        padding: 10px 0;
+                        cursor: pointer;
+
+                        p {
+                            font-size: 16px;
+                            color: #333;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 最后一块内容不携带尾部外边距，使 footer 与上方容器间距与首页一致 */
+    @media (min-width: 768px) {
+        .MainBox > .Left > :last-child {
+            margin-bottom: 0;
+        }
+    }
+}
