@@ -1,0 +1,23 @@
+# 依赖（含 web/ 子目录）
+node_modules/
+
+# Nuxt / Nitro 构建与缓存产物
+/web/**/.nuxt/
+/web/**/.output/
+.wrangler/
+
+# 自动生成的类型声明（由 unplugin-auto-import / unplugin-vue-components 生成，随构建重建）
+/web/auto-imports.d.ts
+/web/components.d.ts
+
+# 本地环境变量与密钥
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# 本地数据文件（含敏感信息，不纳入版本库）
+sql.sql
+
+# 真实 Cloudflare 资源绑定（D1 / KV 等 ID），仅保留占位模板 wrangler.toml
+wrangler.local.toml

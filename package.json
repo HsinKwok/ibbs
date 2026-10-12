@@ -1,0 +1,6 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@workermailer/smtp": "^0.2.1"
+  }
+}

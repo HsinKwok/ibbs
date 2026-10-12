@@ -1,0 +1,17 @@
+{
+  // 前端（Nuxt SSR）Cloudflare Workers 配置。
+  // nitro 构建时会基于本文件生成 .output/server/wrangler.json（含 main / assets 绑定）。
+  // 本文件同时用于「就近遮蔽」仓库根目录的后端 wrangler.toml，避免前端误继承后端绑定。
+  "name": "forum-web",
+  "compatibility_date": "2025-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // 运行时变量：SSR 在边缘读取，用于覆盖 nuxt.config.ts 中 runtimeConfig.public.apiBase
+  "vars": {
+    "NUXT_PUBLIC_API_BASE": "https://api.ibbs.xyz"
+  },
+  // 自定义域名：前端绑定 ibbs.xyz 与 www.ibbs.xyz（nitro 会透传进生成的 wrangler.json）
+  "routes": [
+    { "pattern": "ibbs.xyz", "custom_domain": true },
+    { "pattern": "www.ibbs.xyz", "custom_domain": true }
+  ]
+}
