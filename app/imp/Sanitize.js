@@ -30,6 +30,10 @@ const URL_ATTRS = new Set(['href', 'src', 'poster', 'cite']);
 /* 直接删除（连同内容）的危险标签 */
 const DROP_WITH_CONTENT = 'script|style|iframe|object|embed|applet|meta|link|base|noscript|template|svg|math|form|input|button|textarea|select|option';
 
+/* 预编译危险标签正则：避免每次消毒都 new RegExp 构造（replace 会重置 lastIndex，可安全复用） */
+const DROP_WITH_CONTENT_RE = new RegExp(`<\\s*(${DROP_WITH_CONTENT})\\b[\\s\\S]*?<\\s*\\/\\s*\\1\\s*>`, 'gi');
+const DROP_TAG_RE = new RegExp(`<\\s*\\/?\\s*(${DROP_WITH_CONTENT})\\b[^>]*>`, 'gi');
+
 /* 校验 URL 是否安全 */
 function isUnsafeUrl(url) {
     const v = String(url)
@@ -111,10 +115,10 @@ export default function Sanitize(html) {
     out = out.replace(/<!--(?:>|->|[\s\S]*?(?:--!?>|$))/g, '');
 
     /* 2. 删除危险标签及其内容 */
-    out = out.replace(new RegExp(`<\\s*(${DROP_WITH_CONTENT})\\b[\\s\\S]*?<\\s*\\/\\s*\\1\\s*>`, 'gi'), '');
+    out = out.replace(DROP_WITH_CONTENT_RE, '');
 
     /* 3. 删除残留的自闭合/未闭合危险标签 */
-    out = out.replace(new RegExp(`<\\s*\\/?\\s*(${DROP_WITH_CONTENT})\\b[^>]*>`, 'gi'), '');
+    out = out.replace(DROP_TAG_RE, '');
 
     /* 4. 按白名单处理剩余标签（非白名单标签仅去除标签、保留文本）
        注意：

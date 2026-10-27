@@ -12,8 +12,11 @@ export default {
             }
             const thread = res[0];
 
-            // 获取用户信息（仅取公开展示字段，避免下发邮箱/余额等敏感信息）
-            const User = await global.db.query(`SELECT id, n_nickname, n_avatar FROM n_users WHERE id = ?`, [thread.n_uid]);
+            /* 用户信息与分类关系相互独立，并行查询减少一次往返 */
+            const [User, Tclist] = await Promise.all([
+                global.db.query(`SELECT id, n_nickname, n_avatar FROM n_users WHERE id = ?`, [thread.n_uid]),
+                global.db.query(`SELECT n_cid FROM n_tclist WHERE n_tid = ?`, [pre.id])
+            ]);
             if (User.length > 0) {
                 thread.user = User[0];
             } else {
@@ -26,36 +29,35 @@ export default {
                 };
             }
 
-            // 获取分类关系
-            const Tclist = await global.db.query(`SELECT n_cid FROM n_tclist WHERE n_tid = ?`, [pre.id]);
+            /* 分类详情、点赞状态、购买记录三者互不依赖，一并并行 */
+            const CID = Tclist.map(item => item.n_cid);
+            const isAuthor = Ware && Ware.id && thread.n_uid == Ware.id;
+            const isPaid = thread.n_price > 0 && thread.n_permission !== '1';
+            const [Category, isLiked, buylog] = await Promise.all([
+                CID.length > 0
+                    ? global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (${CID.map(() => '?').join(',')})`, CID)
+                    : Promise.resolve([]),
+                (Ware && Ware.id)
+                    ? global.db.query(`SELECT COUNT(*) FROM n_threads_like WHERE n_tid = ? AND n_uid = ?`, [pre.id, Ware.id])
+                    : Promise.resolve(null),
+                (isPaid && !isAuthor && Ware && Ware.id)
+                    ? global.db.query('select * FROM n_threads_buy where n_tid = ? and n_uid = ?', [pre.id, Ware.id])
+                    : Promise.resolve(null)
+            ]);
 
-            // 获取分类信息
-            if (Tclist.length > 0) {
-                const CID = Tclist.map(item => item.n_cid);
-                const Category = await global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (${CID.map(() => '?').join(',')})`, CID);
-                thread.category = Category;
-            } else {
-                thread.category = [];
-            }
-
+            thread.category = Category;
 
             thread.IsBuy = true
             /* 获取是否点赞 */
-            if (Ware && Ware.id) {
-                const isLiked = await global.db.query(`SELECT COUNT(*) FROM n_threads_like WHERE n_tid = ? AND n_uid = ?`, [pre.id, Ware.id || 0]);
+            if (isLiked) {
                 thread.isLiked = isLiked[0]['COUNT(*)'] > 0;
             }
-            if (thread.n_price > 0 && thread.n_permission !== '1') {
+            if (isPaid) {
                 /* 作者本人查看自己的收费帖无需付费 */
-                const isAuthor = Ware && Ware.id && thread.n_uid == Ware.id;
                 if (!isAuthor) {
                     if (Ware && Ware.id) {
                         /* 获取用户是否购买 n_threads_buy */
-                        const buylog = await global.db.query('select * FROM n_threads_buy where n_tid = ? and n_uid = ?', [
-                            pre.id, Ware.id
-                        ])
-
-                        if (buylog.length == 0) {
+                        if (!buylog || buylog.length == 0) {
                             thread.n_resources = []
                             thread.n_html = 'needBuy'
                             thread.IsBuy = false
@@ -110,7 +112,9 @@ export default {
 
         /* 列表查询与装配封装为可缓存函数；只有「游客且无个性化筛选」时结果才对所有请求方一致，可安全缓存 */
         const buildList = async () => {
-            const res = await global.db.getPaginatedData('n_threads', conditionSql, [...sql.params, ...extraParams], [pre.sort ?? 'id', pre.sortType ?? 'desc'], pre.page, pre.pagesize)
+            /* 列表不返回 n_html（正文最长 5000 字符，前端列表卡片仅用 n_profile/n_resources），
+               剔除后显著缩小 D1 传输与响应序列化体积 */
+            const res = await global.db.getPaginatedData('n_threads', conditionSql, [...sql.params, ...extraParams], [pre.sort ?? 'id', pre.sortType ?? 'desc'], pre.page, pre.pagesize, ['n_html'])
 
             /* 获取分类以及话题 */
             if (res.data.length === 0) {
@@ -126,13 +130,15 @@ export default {
         if (CID.length > 0) {
             /* 获取分类 */
             const Category = await global.Tools.queryInChunks(CID, (c) => global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (${c.map(() => '?').join(',')})`, c))
-            // 建立分类映射关系
+            // 建立分类映射关系（先用 Map 建索引，避免循环内 find 的 O(n·m) 扫描）
+            const categoryById = new Map()
+            for (const cat of Category) categoryById.set(cat.id, cat)
             const threadCategoryMap = {};
             for (let item of Tclist) {
                 if (!threadCategoryMap[item.n_tid]) {
                     threadCategoryMap[item.n_tid] = [];
                 }
-                const category = Category.find(cat => cat.id === item.n_cid);
+                const category = categoryById.get(item.n_cid);
                 if (category) {
                     threadCategoryMap[item.n_tid].push(category);
                 }
@@ -160,7 +166,6 @@ export default {
                 const isBuyer = boughtSet.has(res.data[a].id)
                 if (res.data[a].n_price > 0 && res.data[a].n_permission !== '1' && !isAuthor && !isBuyer) {
                     res.data[a].n_resources = []
-                    res.data[a].n_html = ''
                 } else {
                     /* n_resources 可能为 NULL（无资源帖），JSON.parse(null) 会得到 null 而非数组，需兜底为空数组 */
                     const raw = res.data[a].n_resources
@@ -179,20 +184,25 @@ export default {
         /* 仅当请求方是纯游客（无登录身份，且未使用「我的/我赞/我购」等个性化筛选）时命中 KV 缓存，
            TTL 60s，避免热门/列表读被反复打库；登录用户因付费资源可见性不同而不缓存 */
         const isGuest = !(Ware && Ware.id) && !pre.ismy && !pre.isMyLike && !pre.isMyBuy;
-        let listResult;
-        if (isGuest && global.RedisUtils) {
+        if (isGuest && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
             /* 用 JSON 序列化构造缓存键：字符串会被引号包裹，避免 join(':') 时
                用户可控参数中含冒号导致的键碰撞（如 search='a:b' 与 search='a',uid='b'） */
-            const cacheKey = 'threads:list:' + JSON.stringify([
+            /* v2：缓存内容从「数据对象」改为「完整响应文本」，换前缀避免读到旧格式缓存 */
+            const cacheKey = 'threads:list:v2:' + JSON.stringify([
                 pre.search || '', pre.uid || '', pre.image ?? '', pre.video ?? '',
                 pre.cid || '', pre.cidt || '', pre.sort ?? 'id', pre.sortType ?? 'desc',
                 pre.page || 1, pre.pagesize || 20
             ]);
-            listResult = await global.RedisUtils.getOrSetCache(cacheKey, 60, buildList);
-        } else {
-            listResult = await buildList();
+            /* 缓存的是最终响应文本：命中时零反序列化，直接作为 body 返回，
+               省掉「KV 字符串 → JSON.parse → 再 JSON.stringify」的两次同步序列化 */
+            const bodyText = await global.RedisUtils.getOrSetTextCache(cacheKey, 60, async () => {
+                const listResult = await buildList();
+                return JSON.stringify({ code: 200, msg: '获取成功', data: listResult.data, total: listResult.total });
+            });
+            reply.sendJsonText(bodyText);
+            return;
         }
-
+        const listResult = await buildList();
         global.sendMsg(reply, 200, '获取成功', listResult.data, listResult.total);
     }),
     /* 获取评论列表 */

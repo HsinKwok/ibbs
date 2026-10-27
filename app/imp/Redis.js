@@ -51,6 +51,29 @@ export async function getOrSetCache(key, ttlSeconds, fetchFunction) {
     return freshData;
 }
 
+/**
+ * 获取或设置「已序列化文本」缓存
+ * 适用于直接作为响应体返回的大 JSON（如列表接口）：命中时原样返回字符串，
+ * 省去 JSON.parse + 再次 JSON.stringify 的两次同步序列化开销。
+ */
+export async function getOrSetTextCache(key, ttlSeconds, fetchTextFunction) {
+    const kv = getRedis();
+    try {
+        const cached = await kv.get(key);
+        if (cached !== null && cached !== undefined) return cached;
+    } catch (error) {
+        console.error(`读取缓存失败 [key: ${key}]:`, error);
+    }
+
+    const freshText = await fetchTextFunction();
+    try {
+        await kv.put(key, freshText, { expirationTtl: normalizeTtl(ttlSeconds) });
+    } catch (error) {
+        console.error(`写入缓存失败 [key: ${key}]:`, error);
+    }
+    return freshText;
+}
+
 /* ===== 进程内内存缓存 =====
  * 热点只读接口（分类 / 轮播 / 公告）每次请求都查 KV 或 D1 成本较高：
  * KV 有每日写入额度，D1 有读行额度。Worker isolate 内复用内存可把

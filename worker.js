@@ -82,6 +82,17 @@ class Reply {
         }
         return this.response;
     }
+
+    /* 直接返回已序列化的 JSON 文本（如缓存命中的列表响应），避免二次 stringify */
+    sendJsonText(text) {
+        if (this.sent) return this.response;
+        this.sent = true;
+        this.response = new Response(text, {
+            status: this.statusCode,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        });
+        return this.response;
+    }
 }
 
 async function buildRequest(request) {
@@ -160,15 +171,16 @@ function isOriginAllowed(origin) {
 }
 
 function withCors(response, request) {
-    const headers = new Headers(response.headers);
     const origin = request.headers.get('origin');
-    if (origin) {
-        headers.set('Vary', 'Origin');
-        /* 仅回显白名单内的来源，避免任意站点携带凭证读取响应 */
-        if (isOriginAllowed(origin)) {
-            headers.set('Access-Control-Allow-Origin', origin);
-            headers.set('Access-Control-Allow-Credentials', 'true');
-        }
+    /* 无 Origin（服务端/同源请求）不需要任何 CORS 头，直接返回原响应，
+       省掉每次 new Headers() + new Response() 的克隆开销 */
+    if (!origin) return response;
+    const headers = new Headers(response.headers);
+    headers.set('Vary', 'Origin');
+    /* 仅回显白名单内的来源，避免任意站点携带凭证读取响应 */
+    if (isOriginAllowed(origin)) {
+        headers.set('Access-Control-Allow-Origin', origin);
+        headers.set('Access-Control-Allow-Credentials', 'true');
     }
     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     headers.set('Access-Control-Allow-Headers', 'usertoken,admintoken,Content-Type');

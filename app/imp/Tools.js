@@ -259,9 +259,9 @@ export function validate(fields) {
 
 
 /* n_configuration 短 TTL 内存缓存：减少配置表在高频路径（验证码、上传、站点信息等）的重复全表查询。
-   后台修改配置后调用 clearConfigCache 立即失效。 */
+   TTL 60s 与前台公开数据缓存对齐；后台修改配置后调用 clearConfigCache 立即失效。 */
 let _configCache = { data: null, expire: 0 };
-const CONFIG_CACHE_TTL = 10 * 1000;
+const CONFIG_CACHE_TTL = 60 * 1000;
 
 export async function getConfig() {
   const now = Date.now();
