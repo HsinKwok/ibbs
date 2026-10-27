@@ -190,6 +190,17 @@ async function ensureInit(env) {
             else console.error('❌ 未配置 USER_TOKEN_SECRET，用户认证已禁用（fail-closed），请配置 Worker 密钥！');
             /* CORS 白名单（逗号分隔），未配置时仅放行本地开发来源 */
             global.CORS_ORIGINS = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+            /* Workers 原生限流绑定：未配置时对应项为 null，Tools.checkRateLimit 会降级到 KV/内存计数 */
+            global.RATE_LIMITERS = {
+                postUser: env.RATE_LIMITER_POST_USER || null,
+                postUserNew: env.RATE_LIMITER_POST_NEW || null,
+                postIp: env.RATE_LIMITER_POST_IP || null,
+                commentUser: env.RATE_LIMITER_COMMENT_USER || null,
+                commentUserNew: env.RATE_LIMITER_COMMENT_NEW || null,
+                commentIp: env.RATE_LIMITER_COMMENT_IP || null
+            };
+            /* hCaptcha 服务端密钥：未配置时跳过人机验证（等同该防护未启用） */
+            global.HCAPTCHA_SECRET = env.HCAPTCHA_SECRET || '';
             await initDb(env.DB);
             await initRedisGlobals(env.KV); // 失败不阻断
         })().catch((error) => {

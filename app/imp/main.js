@@ -27,7 +27,13 @@ import {
     acquireCooldown,
     revokeToken,
     isTokenRevoked,
-    isUserMuted
+    isUserMuted,
+    checkRateLimit,
+    getTrustLevel,
+    normalizeContent,
+    hashContent,
+    isDuplicateContent,
+    verifyHCaptcha
 } from './Tools.js';
 import SqlFun from './SqlFun.js';
 import Timezone from './Timezone.js';
@@ -97,6 +103,13 @@ global.Tools.revokeToken = revokeToken;
 global.Tools.isTokenRevoked = isTokenRevoked;
 /* 挂载禁言判定（发帖/评论前校验 n_mute_end 是否到期） */
 global.Tools.isUserMuted = isUserMuted;
+/* 挂载原生限流（未绑定则降级 KV）、新用户识别、内容去重与 hCaptcha 校验 */
+global.Tools.checkRateLimit = checkRateLimit;
+global.Tools.getTrustLevel = getTrustLevel;
+global.Tools.normalizeContent = normalizeContent;
+global.Tools.hashContent = hashContent;
+global.Tools.isDuplicateContent = isDuplicateContent;
+global.Tools.verifyHCaptcha = verifyHCaptcha;
 
 /* 挂载全站时区工具：业务层统一通过 global.Tools 取时区/格式化/生成 SQL 修饰符，避免各自硬编码 +8 */
 global.Tools.DEFAULT_TIMEZONE = Timezone.DEFAULT_TIMEZONE;

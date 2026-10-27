@@ -32,6 +32,15 @@ const cleanNickname = (value) => {
     return global.Sanitize(raw);
 };
 
+/* 取默认用户组 id（用户组管理中被标记为默认的组，n_deft = 1），新注册用户自动归属该组；
+   排除系统内置的管理员组；未配置默认组时返回 null，保持与历史数据一致 */
+const getDefaultGroupId = async () => {
+    const rows = await global.db.query(
+        'SELECT id FROM n_usergroup WHERE n_deft = 1 AND (n_builtin IS NULL OR n_builtin != 1) ORDER BY id ASC LIMIT 1'
+    );
+    return rows.length ? rows[0].id : null;
+}
+
 export default {
     /* 登录 */
     login: (request, reply) => global.Fun(reply, async () => {
@@ -152,7 +161,9 @@ export default {
             n_points: 0,
             n_signature: '这家伙很懒，什么都没留下',
             n_encoding: await global.Tools.generateUniqueEncoding(5),
-            n_balance: 0
+            n_balance: 0,
+            /* 新用户直接归属用户组管理中的默认用户组，后台用户列表可正确显示其所属组 */
+            n_group_id: await getDefaultGroupId()
         }
 
         /* 条件插入：用户名唯一性由 SQL 层原子保证，避免「先查后插」在并发下创建重复账号。
@@ -249,6 +260,8 @@ export default {
                 n_signature: '这家伙很懒，什么都没留下',
                 n_encoding: await global.Tools.generateUniqueEncoding(5),
                 n_balance: 0,
+                /* 同注册流程：新用户自动归属默认用户组 */
+                n_group_id: await getDefaultGroupId(),
                 n_MiniProgramOpenid: res.openid
             }
 

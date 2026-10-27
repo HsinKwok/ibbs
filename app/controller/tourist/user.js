@@ -171,9 +171,8 @@ export default {
     /* 批量获取用户基础信息（列表页头像/昵称预取用，替代逐条 /GetUser 造成的前端 N+1 请求） */
     GetUsers: (request, reply) => global.Fun(reply, async () => {
         const pre = request.body || {};
-        let ids = Array.isArray(pre.ids) ? pre.ids : [];
-        /* 去重并统一为字符串（n_users.id 为字符串主键），剔除空值 */
-        ids = [...new Set(ids.filter((id) => id !== undefined && id !== null && id !== '').map(String))];
+        /* 前端统一以表单提交，数组会被压成逗号串，这里兼容数组与逗号串两种形式 */
+        const ids = global.Tools.parseIds(pre.ids);
         if (ids.length === 0) {
             global.sendMsg(reply, 200, '获取成功', []);
             return;

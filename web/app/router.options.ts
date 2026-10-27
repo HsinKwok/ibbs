@@ -1,3 +1,4 @@
+import type { RouteRecordRaw } from 'vue-router'
 import { DEFAULT_ADMIN_SEGMENT, adminBaseFromSegment, setAdminBase } from '../utils/adminPath.js'
 import { loadWebInfo } from '../utils/siteConfig.js'
 
@@ -12,21 +13,29 @@ const BASE = '/' + DEFAULT_ADMIN_SEGMENT
 /* 读取后台入口段；请求本身由 siteConfig 统一缓存/去重，避免与 app.vue 重复拉取 */
 async function fetchAdminSegment() {
   try {
-    const res = await loadWebInfo()
+    /* 客户端首次加载时优先复用 SSR 写入 payload 的站点配置，
+       避免路由初始化阶段再发一次 /api/webinfo（该请求常因页面刷新/跳转被打断，控制台报 ERR_ABORTED） */
+    let cached = null
+    try {
+      cached = useState('site-config').value
+    } catch (e) {
+      /* 不在 Nuxt 上下文时忽略，回退到网络加载 */
+    }
+    const res = cached || await loadWebInfo()
     return (res && res.code === 200 && res.data && res.data.n_admin_path) || ''
   } catch (e) {
     return ''
   }
 }
 
-function rewritePath(path, base, custom) {
+function rewritePath(path: any, base: string, custom: string) {
   if (typeof path !== 'string' || !path) return path
   if (path === base) return custom
   if (path.startsWith(base + '/')) return custom + path.slice(base.length)
   return path
 }
 
-function isAdminPath(path, base) {
+function isAdminPath(path: any, base: string) {
   return path === base || (typeof path === 'string' && path.startsWith(base + '/'))
 }
 
@@ -35,7 +44,7 @@ function isAdminPath(path, base) {
  * 注意：_routes 是模块级单例、跨请求共享，绝不能原地修改，
  * 否则自定义入口一旦写入就无法再还原为默认 /admin。
  */
-function transform(routes, base, custom) {
+function transform(routes: RouteRecordRaw[], base: string, custom: string): RouteRecordRaw[] {
   return routes.map((route) => {
     const next = { ...route }
     const original = route.path
@@ -64,11 +73,11 @@ function transform(routes, base, custom) {
 }
 
 export default {
-  async routes(_routes) {
+  async routes(_routes: readonly RouteRecordRaw[]) {
     const segment = await fetchAdminSegment()
     const custom = adminBaseFromSegment(segment)
     setAdminBase(custom)
     // 始终基于原始 _routes 生成副本：默认时保留 /admin，自定义时改写前缀
-    return transform(_routes, BASE, custom)
+    return transform([..._routes], BASE, custom)
   }
 }

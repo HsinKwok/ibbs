@@ -1,5 +1,5 @@
 // 错误码对应信息
-import { setTimezone, sqlTimezoneModifier } from './Timezone.js';
+import { setTimezone, sqlTimezoneModifier, formatDateTime } from './Timezone.js';
 
 const codemsg = {
   200: "成功",
@@ -654,6 +654,157 @@ export async function isUserMuted(uid) {
     [uid, sqlTimezoneModifier()]
   );
   return rows.length > 0;
+}
+
+/*
+ * 统一限流入口：优先走 Workers 原生 Rate Limiting binding（边缘侧计数，不产生 KV 写额度），
+ * 绑定缺失或调用异常时降级为 KV/内存计数，保证防护不因绑定未配置而整体失效。
+ * 返回 true 表示放行（本次请求已计数），false 表示超限应拒绝。
+ * 注意：原生绑定的阈值由 wrangler 的 `simple = { limit, period }` 决定，入参 limit 仅用于降级路径。
+ */
+export async function checkRateLimit(bindingName, key, limit, ttlSeconds = 60) {
+  const binding = global.RATE_LIMITERS && global.RATE_LIMITERS[bindingName];
+  if (binding && typeof binding.limit === 'function') {
+    try {
+      const result = await binding.limit({ key });
+      if (result && typeof result.success === 'boolean') return result.success;
+    } catch (error) {
+      console.error(`Rate Limiting binding ${bindingName} 调用失败，降级为 KV 计数:`, error);
+    }
+  }
+  if (await isRateLimited(key, limit)) return false;
+  await incrRateCount(key, ttlSeconds);
+  return true;
+}
+
+/* ---------------- 新用户识别（用于收紧发帖/评论阈值） ---------------- */
+/* 注册未满 24 小时，或历史发帖 + 评论总数不足 5 条，视为新用户 */
+const TRUST_NEW_ACCOUNT_SECONDS = 24 * 60 * 60;
+const TRUST_NEW_CONTENT_COUNT = 5;
+const TRUST_CACHE_TTL = 300;
+const TRUST_CACHE_MAX = 2000;
+
+const trustCache = new Map();
+
+/* 返回 'new' | 'trusted'；查询失败按 new 处理（更严格），避免故障时直接放开限制 */
+export async function getTrustLevel(uid) {
+  if (uid === undefined || uid === null || uid === '') return 'new';
+  const cacheKey = String(uid);
+  const cached = trustCache.get(cacheKey);
+  if (cached && cached.expireAt > Date.now()) return cached.level;
+
+  let level = 'new';
+  try {
+    /* 注册时长在 SQL 侧按站点时区换算，避免 Worker 运行时以 UTC 解析本地时间串产生偏差 */
+    const rows = await global.db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM n_threads WHERE n_uid = ?) AS thread_count,
+         (SELECT COUNT(*) FROM n_comment WHERE n_uid = ?) AS comment_count,
+         (SELECT CAST((julianday('now', ?) - julianday(n_registertime)) * 86400 AS INTEGER)
+            FROM n_users WHERE id = ?) AS age_seconds`,
+      [uid, uid, sqlTimezoneModifier(), uid]
+    );
+    const row = rows[0] || {};
+    const contentCount = Number(row.thread_count || 0) + Number(row.comment_count || 0);
+    /* 注册时间缺失时 age_seconds 为 null，转成 0 即按新用户处理 */
+    const ageSeconds = Number(row.age_seconds || 0);
+    level = (ageSeconds < TRUST_NEW_ACCOUNT_SECONDS || contentCount < TRUST_NEW_CONTENT_COUNT)
+      ? 'new'
+      : 'trusted';
+  } catch (error) {
+    console.error('获取用户信任等级失败，按新用户处理:', error);
+    return 'new';
+  }
+
+  if (trustCache.size >= TRUST_CACHE_MAX) trustCache.clear();
+  trustCache.set(cacheKey, { level, expireAt: Date.now() + TRUST_CACHE_TTL * 1000 });
+  return level;
+}
+
+/* ---------------- 内容去重（归一化 + SHA-256） ---------------- */
+/* 仅比对最近 10 分钟、每用户最近 10 条，兼顾防重复与查询开销 */
+const DEDUPE_WINDOW_SECONDS = 600;
+const DEDUPE_SCAN_LIMIT = 10;
+/* 归一化后不足 8 字符的内容不参与去重，避免“支持一下”这类短评被误判 */
+const DEDUPE_MIN_LEN = 8;
+
+const DEDUPE_TABLES = { thread: 'n_threads', comment: 'n_comment' };
+
+/* 归一化正文：去标签/实体/零宽字符，压缩空白并转小写，使改动空白或加标签的复制粘贴仍能被识别 */
+export function normalizeContent(raw) {
+  return String(raw ?? '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&[a-zA-Z#0-9]{2,10};/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/* 归一化后计算 SHA-256；内容过短返回空串（调用方视为不参与去重） */
+export async function hashContent(raw) {
+  const normalized = normalizeContent(raw);
+  if (normalized.length < DEDUPE_MIN_LEN) return '';
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* 判定同一用户近期是否发布过相同内容；type 仅接受 'thread' / 'comment'，表名走白名单避免注入 */
+export async function isDuplicateContent(uid, raw, type = 'thread') {
+  const table = DEDUPE_TABLES[type];
+  if (!table || uid === undefined || uid === null || uid === '') return false;
+  const hash = await hashContent(raw);
+  if (!hash) return false;
+
+  /* n_time 为 'YYYY-MM-DD HH:mm:ss' 文本，按同格式字符串比较即可 */
+  const cutoff = formatDateTime(new Date(Date.now() - DEDUPE_WINDOW_SECONDS * 1000));
+  const rows = await global.db.query(
+    `SELECT n_html FROM ${table} WHERE n_uid = ? AND n_time >= ? ORDER BY id DESC LIMIT ${DEDUPE_SCAN_LIMIT}`,
+    [uid, cutoff]
+  );
+  for (const row of rows) {
+    if (await hashContent(row.n_html) === hash) return true;
+  }
+  return false;
+}
+
+/* ---------------- hCaptcha 服务端校验 ---------------- */
+/*
+ * 未配置 HCAPTCHA_SECRET 时直接放行（等同该防护未启用）；
+ * 配置后 fail-closed：令牌缺失、校验失败或校验服务不可达均拒绝。
+ * 返回 { ok, missing?, msg? }，missing 用于前端区分「需要补做人机验证」。
+ */
+export async function verifyHCaptcha(token, request) {
+  /* 密钥可能因粘贴带上换行/空格，先去掉首尾空白，否则 hCaptcha 会判无效密钥 */
+  const secret = String(global.HCAPTCHA_SECRET || '').trim();
+  if (!secret) return { ok: true, skipped: true };
+  if (!token || typeof token !== 'string') {
+    return { ok: false, missing: true, msg: '请先完成人机验证' };
+  }
+
+  const body = new URLSearchParams();
+  body.append('secret', secret);
+  body.append('response', token);
+  const ip = getClientIp(request);
+  if (ip && ip !== 'unknown') body.append('remoteip', ip);
+
+  try {
+    const response = await fetch('https://api.hcaptcha.com/siteverify', { method: 'POST', body });
+    const result = await response.json();
+    if (result && result.success) return { ok: true };
+    /* 错误码只写日志，不返回给前端 */
+    const codes = result && Array.isArray(result['error-codes']) ? result['error-codes'] : [];
+    console.error('hCaptcha 校验未通过:', JSON.stringify({
+      status: response.status,
+      codes,
+      hostname: result && result.hostname,
+      ip
+    }));
+    return { ok: false, msg: '人机验证失败，请重新验证' };
+  } catch (error) {
+    console.error('hCaptcha 校验请求失败:', error);
+    return { ok: false, msg: '人机验证服务暂不可用，请稍后再试' };
+  }
 }
 
 

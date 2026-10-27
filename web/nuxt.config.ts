@@ -81,6 +81,8 @@ export default defineNuxtConfig({
     public: {
       /* 后端 API 地址：部署时用环境变量 NUXT_PUBLIC_API_BASE 覆盖 */
       apiBase: process.env.NUXT_PUBLIC_API_BASE || 'http://127.0.0.1:8787',
+      /* hCaptcha 站点密钥（公开值）：留空则不渲染验证码组件，部署时用 NUXT_PUBLIC_HCAPTCHA_SITE_KEY 覆盖 */
+      hcaptchaSiteKey: process.env.NUXT_PUBLIC_HCAPTCHA_SITE_KEY || '',
     },
   },
   app: {

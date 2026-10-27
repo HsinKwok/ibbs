@@ -8,6 +8,11 @@ const PRICE_MAX = 1000000;
 /* 频控：每用户 60 秒内最多发帖/评论数 */
 const POST_RATE_LIMIT = 5;
 const COMMENT_RATE_LIMIT = 10;
+/* 新用户（注册未满 24 小时或内容不足 5 条）收紧额度，与 wrangler 中原生限流绑定阈值保持一致 */
+const POST_RATE_LIMIT_NEW = 2;
+const COMMENT_RATE_LIMIT_NEW = 3;
+/* 新用户发帖冷却时间（秒）：两次发帖之间至少间隔，进一步压制批量灌水 */
+const POST_NEW_COOLDOWN = 120;
 const RATE_TTL = 60;
 
 /* 频控：每 IP 60 秒内最多发帖/评论数。用户维度限流可被换号绕过，IP 维度做兜底约束。 */
@@ -100,17 +105,39 @@ export default {
             return global.sendMsg(reply, 201, ext.error);
         }
 
-        /* 频控：每用户 60 秒内最多发帖 N 条；叠加 IP 维度兜底，防止换号绕过用户级限流批量灌水。
-           先统一判定两者再累加计数，避免被拦截的请求仍消耗用户配额。 */
+        /* 人机验证：后台管理员复用同一接口但没有验证码组件，跳过校验；
+           未配置 HCAPTCHA_SECRET 时 verifyHCaptcha 直接放行（等同该防护未启用） */
+        if (!(await global.Tools.isAdminRequest(request))) {
+            const captcha = await global.Tools.verifyHCaptcha(pre.h_captcha_token, request);
+            if (!captcha.ok) {
+                return global.sendMsg(reply, 201, captcha.msg || '人机验证未通过，请重试');
+            }
+        }
+
+        /* 内容去重：同一用户 10 分钟内重复发布相同正文视为灌水 */
+        if (await global.Tools.isDuplicateContent(Ware.id, content, 'thread')) {
+            return global.sendMsg(reply, 201, '请勿重复发布相同内容');
+        }
+
+        /* 频控：新用户使用更严格阈值并额外加冷却；叠加 IP 维度兜底，防止换号绕过用户级限流。
+           限流走 Workers 原生 binding（未绑定时自动降级 KV），不消耗 KV 写额度。 */
+        const isNewUser = (await global.Tools.getTrustLevel(Ware.id)) === 'new';
         const clientIp = global.Tools.getClientIp(request);
         const userRateKey = `thread:add:${Ware.id}`;
         const ipRateKey = `thread:add:ip:${clientIp}`;
-        if (await global.Tools.isRateLimited(userRateKey, POST_RATE_LIMIT)
-            || await global.Tools.isRateLimited(ipRateKey, POST_IP_RATE_LIMIT)) {
+        if (isNewUser && !(await global.Tools.acquireCooldown(`thread:add:cooldown:${Ware.id}`, POST_NEW_COOLDOWN))) {
+            return global.sendMsg(reply, 201, `新账号发帖需间隔 ${POST_NEW_COOLDOWN} 秒，请稍后再试`);
+        }
+        const userAllowed = await global.Tools.checkRateLimit(
+            isNewUser ? 'postUserNew' : 'postUser',
+            userRateKey,
+            isNewUser ? POST_RATE_LIMIT_NEW : POST_RATE_LIMIT,
+            RATE_TTL
+        );
+        const ipAllowed = await global.Tools.checkRateLimit('postIp', ipRateKey, POST_IP_RATE_LIMIT, RATE_TTL);
+        if (!userAllowed || !ipAllowed) {
             return global.sendMsg(reply, 201, '发帖过于频繁，请稍后再试');
         }
-        await global.Tools.incrRateCount(userRateKey, RATE_TTL);
-        await global.Tools.incrRateCount(ipRateKey, RATE_TTL);
 
         let Form = {
             n_name: global.Sanitize(pre.n_name),
@@ -319,16 +346,37 @@ export default {
             return global.sendMsg(reply, 201, `评论内容长度不能超过${CONTENT_MAX_LEN}字符`);
         }
 
-        /* 频控：每用户 60 秒内最多评论 N 条；叠加 IP 维度兜底，防止换号绕过用户级限流批量灌水。 */
+        /* 新用户评论需人机验证：前端收到 202 + captchaRequired 后再渲染验证码并重发，
+           已验证用户不重复打断，避免每次评论都增加摩擦 */
+        const isNewUser = (await global.Tools.getTrustLevel(Ware.id)) === 'new';
+        if (isNewUser) {
+            const captcha = await global.Tools.verifyHCaptcha(pre.h_captcha_token, request);
+            if (!captcha.ok) {
+                return captcha.missing
+                    ? global.sendMsg(reply, 202, '请完成人机验证后重新发送', { captchaRequired: true })
+                    : global.sendMsg(reply, 201, captcha.msg || '人机验证未通过，请重试');
+            }
+        }
+
+        /* 内容去重：同一用户 10 分钟内重复发表相同评论视为灌水 */
+        if (await global.Tools.isDuplicateContent(Ware.id, pre.n_html, 'comment')) {
+            return global.sendMsg(reply, 201, '请勿重复发表相同评论');
+        }
+
+        /* 频控：新用户使用更严格阈值；叠加 IP 维度兜底，防止换号绕过用户级限流 */
         const clientIp = global.Tools.getClientIp(request);
         const userRateKey = `thread:comment:${Ware.id}`;
         const ipRateKey = `thread:comment:ip:${clientIp}`;
-        if (await global.Tools.isRateLimited(userRateKey, COMMENT_RATE_LIMIT)
-            || await global.Tools.isRateLimited(ipRateKey, COMMENT_IP_RATE_LIMIT)) {
+        const userAllowed = await global.Tools.checkRateLimit(
+            isNewUser ? 'commentUserNew' : 'commentUser',
+            userRateKey,
+            isNewUser ? COMMENT_RATE_LIMIT_NEW : COMMENT_RATE_LIMIT,
+            RATE_TTL
+        );
+        const ipAllowed = await global.Tools.checkRateLimit('commentIp', ipRateKey, COMMENT_IP_RATE_LIMIT, RATE_TTL);
+        if (!userAllowed || !ipAllowed) {
             return global.sendMsg(reply, 201, '评论过于频繁，请稍后再试');
         }
-        await global.Tools.incrRateCount(userRateKey, RATE_TTL);
-        await global.Tools.incrRateCount(ipRateKey, RATE_TTL);
 
         const from = {
             n_tid: pre.id,

@@ -248,6 +248,46 @@ CORS_ORIGINS = "https://<你的前端域名>,http://localhost:3000"
 
 > 邮件 SMTP 在后台「邮件配置」页面维护、存于数据库，无需环境变量。
 
+#### 防灌水（可选，推荐开启）
+
+**1）人机验证 hCaptcha**
+
+需与前端**成对**配置，只配一端会导致前端没有验证码控件、或后端校验必然失败：
+
+```bash
+# 后端：Worker secret（hCaptcha 后台的 Secret Key）
+wrangler secret put HCAPTCHA_SECRET
+```
+
+```jsonc
+// 前端：web/wrangler.jsonc 的 vars（hCaptcha 后台的 Site Key）
+"NUXT_PUBLIC_HCAPTCHA_SITE_KEY": "<你的 Site Key>"
+```
+
+两者都留空时人机验证自动跳过（等同未启用），不影响正常使用。
+
+**2）原生 Rate Limiting binding**
+
+`wrangler.toml` 已内置 6 个限流器（`[[ratelimits]]`），无需额外创建资源：
+
+| binding | namespace_id | 限额 |
+| --- | --- | --- |
+| `RATE_LIMITER_POST_USER` | 1001 | 普通用户发帖 5 次 / 60 秒 |
+| `RATE_LIMITER_POST_NEW` | 1002 | 新用户发帖 2 次 / 60 秒 |
+| `RATE_LIMITER_POST_IP` | 1003 | 同 IP 发帖 20 次 / 60 秒 |
+| `RATE_LIMITER_COMMENT_USER` | 1004 | 普通用户评论 10 次 / 60 秒 |
+| `RATE_LIMITER_COMMENT_NEW` | 1005 | 新用户评论 3 次 / 60 秒 |
+| `RATE_LIMITER_COMMENT_IP` | 1006 | 同 IP 评论 30 次 / 60 秒 |
+
+`namespace_id` 在**同一账号内必须唯一**，若你已占用 1001~1006，改成其他数字即可。注意 binding 的计数是**单个边缘节点（colocation）级**的尽力而为配额，不能当作全局精确计数；绑定缺失或调用异常时会自动降级为原有 KV 计数。
+
+**3）内置防护策略**
+
+- **新用户判定**：注册不足 24 小时或发帖+评论总数不足 5 条 → 按新用户走更严阈值；
+- **发帖冷却**：新用户两次发帖至少间隔 120 秒；
+- **内容去重**：发帖/评论内容归一化（去 HTML 标签、实体、零宽字符、压缩空白）后取 SHA-256，与本人最近 10 分钟内最近 10 条内容比对，重复则拒绝；归一化后不足 8 字符的内容不参与去重；
+- **验证码范围**：发帖全部校验（管理员除外）；评论仅新用户校验，后端下发 `code=202` + `captchaRequired` 后前端再展示控件。
+
 ### 五、部署后端 Worker
 
 ```bash
@@ -295,6 +335,8 @@ npx wrangler --cwd .output deploy
   { "pattern": "www.<你的域名>", "custom_domain": true }
 ]
 ```
+
+若启用了 hCaptcha，Site Key 需在 `web/wrangler.jsonc` 的 `vars` 中设置（`NUXT_PUBLIC_HCAPTCHA_SITE_KEY`，注意 `SITE_KEY` 分开写才能映射到 `hcaptchaSiteKey`），它是 `runtimeConfig.public` 的运行时覆盖项，改完重新部署前端即可生效，不必重新构建。
 
 `web/public/` 下的静态文件（如 `class-icons/`、`avatars/`）会随构建打入产物，由前端 Worker 直接提供。
 

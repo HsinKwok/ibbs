@@ -95,8 +95,10 @@
                 <div class="content">
                     <a-textarea class="road" v-model="form.n_html" placeholder="请输入评论" :max-length="100" allow-clear
                         show-word-limit />
+                    <!-- 新用户评论需人机验证：后端返回 202 后才展示 -->
+                    <HCaptcha v-if="captchaRequired" ref="captchaRef" class="comment-captcha" label="人机验证"
+                        hint="为防范灌水，首次评论需验证；通过后将自动发送" @verify="CommentThreads" />
                     <div class="ButtonSection">
-
                         <a-button type="primary" class="send-btn" :loading="commentSubmitting" @click="CommentThreads()">
                             <template #icon>
                                 <icon-send />
@@ -265,18 +267,34 @@ const form = ref({
 })
 /* 评论 CommentThreads */
 const commentSubmitting = ref(false)
+/* 新用户评论需人机验证：首次提交后由后端下发 captchaRequired 再展示验证码 */
+const captchaRequired = ref(false)
+const captchaRef = ref(null)
 const CommentThreads = async () => {
     if (commentSubmitting.value) return
+    const token = captchaRef.value?.getToken?.() || ''
+    if (captchaRequired.value && !token) {
+        Message.warning('请先完成人机验证')
+        return
+    }
+    const payload = { ...form.value }
+    if (token) payload.h_captcha_token = token
     commentSubmitting.value = true
     try {
-        const res = await useApiFetch().post('/api/CommentThreads', form.value)
+        const res = await useApiFetch().post('/api/CommentThreads', payload)
         if (res.code == 200) {
             Message.success('评论成功')
             form.value.n_html = ''
+            /* 令牌一次性有效，成功后重置以便下一条评论重新验证 */
+            captchaRef.value?.reset()
             GetCommentList()
+        } else if (res.code == 202 && res.data?.captchaRequired) {
+            captchaRequired.value = true
+            Message.warning('为防范灌水，请先完成人机验证')
         } else if (res.code == 401) {
             navigateTo('/login')
         } else {
+            captchaRef.value?.reset()
             Message.error(res.msg || '评论失败')
         }
     } catch (error) {
@@ -950,5 +968,11 @@ const ShareShow = ref(false)
     .MainBox > .Left > :last-child {
         margin-bottom: 0;
     }
+}
+
+/* 人机验证独占一行，避免与发送按钮挤在同一行（移动端/桌面端一致） */
+.comment-captcha {
+    display: block;
+    margin-top: 10px;
 }
 </style>

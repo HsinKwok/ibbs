@@ -27,6 +27,52 @@ bucket_name = "forum-uploads"
 binding = "KV"
 id = "<YOUR_KV_NAMESPACE_ID>"
 
+# Workers 原生限流（Rate Limiting binding）：计数在边缘节点侧完成，不消耗 KV 写额度。
+# 注意：period 只能是 10 或 60 秒，且计数为单个边缘节点级别（非全局严格配额），属尽力而为。
+# limit 为「60 秒内允许的请求数」，与 app/controller/user/threads.js 中的阈值保持一致。
+[[ratelimits]]
+name = "RATE_LIMITER_POST_USER"
+namespace_id = "1001"
+simple = { limit = 5, period = 60 }
+
+# 新用户发帖（注册未满 24 小时或内容不足 5 条）
+[[ratelimits]]
+name = "RATE_LIMITER_POST_NEW"
+namespace_id = "1002"
+simple = { limit = 2, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_POST_IP"
+namespace_id = "1003"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_COMMENT_USER"
+namespace_id = "1004"
+simple = { limit = 10, period = 60 }
+
+# 新用户评论
+[[ratelimits]]
+name = "RATE_LIMITER_COMMENT_NEW"
+namespace_id = "1005"
+simple = { limit = 3, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_COMMENT_IP"
+namespace_id = "1006"
+simple = { limit = 30, period = 60 }
+
+# 智能放置：让 Worker 就近运行在 D1 等后端资源附近
+[placement]
+mode = "smart"
+
+# 可观测性：开启日志与问题洞察
+[observability]
+enabled = true
+
+[observability.issues]
+enabled = true
+
 # 自定义域名：后端 API 绑定到 api.ibbs.xyz（zone 需已接入本账号）
 [[routes]]
 pattern = "api.ibbs.xyz"

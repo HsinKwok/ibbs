@@ -450,7 +450,8 @@ onUnmounted(() => {
 
 <style lang="scss" scoped>
 .Page {
-    width: calc(100% - 30px);
+    /* 全局 box-sizing 为 border-box，宽度直接占满内容区即可，避免再减 30px 导致右侧留白 */
+    width: 100%;
     background-color: #fff;
     padding: 15px;
     border-radius: 20px;

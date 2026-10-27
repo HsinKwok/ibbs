@@ -49,6 +49,10 @@
                                     placeholder="请输入价格" />
                             </a-space>
                         </a-form-item>
+                        <div v-if="isAdd" class="CaptchaBox">
+                            <!-- 新建帖子需人机验证（未配置站点密钥时不渲染） -->
+                            <HCaptcha ref="captchaRef" label="人机验证" hint="提交前请完成验证，用于防止恶意灌水" />
+                        </div>
                         <a-form-item field="post" label="">
                             <a-button type="primary" class="road" @click="SubmitForm()">提交</a-button>
                         </a-form-item>
@@ -65,6 +69,9 @@
 import { Message } from '@arco-design/web-vue';
 const route = useRoute()
 const id = route.params.id
+/* 新建（/threadInfo/add）与编辑共用本页，仅新建需要人机验证 */
+const isAdd = id == 'add'
+const captchaRef = ref(null)
 const SiteConfig = useSiteConfig()
 
 /* 上传功能总开关：仅当配置为 '0' 时关闭 */
@@ -117,10 +124,22 @@ const SubmitForm = async () => {
         }
     }
 
+    /* 新建帖子需携带人机验证令牌；组件未渲染（未配置站点密钥）时跳过 */
+    if (isAdd && captchaRef.value?.enabled) {
+        const token = captchaRef.value.getToken()
+        if (!token) {
+            Message.warning('请先完成人机验证')
+            return
+        }
+        subFrom.h_captcha_token = token
+    }
+
     try {
         let res;
         if (id == 'add') {
             res = await useApiFetch().post('/api/AddThreads', subFrom)
+            /* 令牌一次性有效：提交后无论成败都重置，便于用户重试 */
+            captchaRef.value?.reset()
         } else {
             res = await useApiFetch().post('/api/EditThreads', subFrom)
         }
@@ -265,5 +284,10 @@ if (id == 'add') {
 .road {
     border-radius: 10px !important;
     overflow: hidden;
+}
+
+/* 人机验证区域：与表单字段保持一致的纵向节奏 */
+.CaptchaBox {
+    margin-bottom: 16px;
 }
 </style>

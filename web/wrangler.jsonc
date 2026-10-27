@@ -5,9 +5,12 @@
   "name": "forum-web",
   "compatibility_date": "2025-05-15",
   "compatibility_flags": ["nodejs_compat"],
-  // 运行时变量：SSR 在边缘读取，用于覆盖 nuxt.config.ts 中 runtimeConfig.public.apiBase
+  // 运行时变量：SSR 在边缘读取，用于覆盖 nuxt.config.ts 中 runtimeConfig.public.*
   "vars": {
-    "NUXT_PUBLIC_API_BASE": "https://api.ibbs.xyz"
+    "NUXT_PUBLIC_API_BASE": "https://api.ibbs.xyz",
+    // hCaptcha 站点密钥（公开值，非密钥）；留空则前端不渲染验证码组件。
+    // 与后端 Worker 密钥 HCAPTCHA_SECRET 需成对配置，否则后端会要求验证而前端无法提供。
+    "NUXT_PUBLIC_HCAPTCHA_SITE_KEY": "118c3b9c-2522-4ac0-96e4-ab7a8a08ca60"
   },
   // 自定义域名：前端绑定 ibbs.xyz 与 www.ibbs.xyz（nitro 会透传进生成的 wrangler.json）
   "routes": [
