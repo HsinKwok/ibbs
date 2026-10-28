@@ -8,7 +8,8 @@ export default function createTokenMiddleware(tokenType, { optional = false } = 
 
         if (!token) {
             if (optional) return;
-            return global.sendMsg(reply, 401, '缺少token');
+            /* 游客触发需要登录的操作时给前台展示可读提示，不暴露内部鉴权细节 */
+            return global.sendMsg(reply, 401, '请先登录');
         }
 
         try {
@@ -25,7 +26,7 @@ export default function createTokenMiddleware(tokenType, { optional = false } = 
                当前签发流程会为所有令牌写入 tokenType，故不再放行缺失该字段的旧令牌。 */
             const data = verifyResult.data;
             if (data.tokenType !== tokenType) {
-                return global.sendMsg(reply, 401, '令牌类型不匹配');
+                return global.sendMsg(reply, 401, '登录状态无效，请重新登录');
             }
 
             /* token 撤销校验：账号改密/被强制下线后，签发时间（iat）早于撤销时间戳的旧 token 立即失效。

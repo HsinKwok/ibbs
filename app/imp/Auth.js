@@ -104,10 +104,10 @@ class Auth {
     // 校验 token
     async VerifyAuthCode(token, key) {
         if (!token || typeof token !== 'string') {
-            return { code: 401, msg: '无效token' };
+            return { code: 401, msg: '登录状态无效，请重新登录' };
         }
         if (!key || typeof key !== 'string') {
-            return { code: 401, msg: '无效密钥' };
+            return { code: 401, msg: '登录状态无效，请重新登录' };
         }
 
         /* 命中短期 memo 直接返回，省掉解密与 JSON 解析 */
@@ -119,7 +119,7 @@ class Auth {
 
             const data = new Uint8Array(base64ToArrayBuffer(token));
             if (data.length < IV_LENGTH) {
-                return { code: 401, msg: 'token格式错误' };
+                return { code: 401, msg: '登录凭证格式错误，请重新登录' };
             }
             const iv = data.slice(0, IV_LENGTH);
             const ciphertext = data.slice(IV_LENGTH);
@@ -127,19 +127,19 @@ class Auth {
             const info = JSON.parse(decoder.decode(decrypted));
 
             if (!info.endtime || typeof info.endtime !== 'number') {
-                return { code: 401, msg: 'token格式错误' };
+                return { code: 401, msg: '登录凭证格式错误，请重新登录' };
             }
             if (info.endtime < Date.now()) {
-                return { code: 401, msg: 'token已过期' };
+                return { code: 401, msg: '登录已过期，请重新登录' };
             }
 
             return writeVerifyMemo(token, info);
         } catch (error) {
             console.error('Token解密失败:', error?.message || error);
             if (error instanceof SyntaxError) {
-                return { code: 401, msg: 'token格式错误' };
+                return { code: 401, msg: '登录凭证格式错误，请重新登录' };
             }
-            return { code: 401, msg: 'token无效或密钥错误' };
+            return { code: 401, msg: '登录状态已失效，请重新登录' };
         }
     }
 }

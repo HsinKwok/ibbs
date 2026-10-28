@@ -89,3 +89,10 @@ button {
 .NavBar:empty {
   display: none;
 }
+
+/* Arco Message 提示统一屏幕垂直居中（默认吸附在顶部） */
+.arco-message-list {
+  top: 50% !important;
+  bottom: auto !important;
+  transform: translateY(-50%);
+}
