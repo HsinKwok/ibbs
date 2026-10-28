@@ -33,6 +33,7 @@ import {
     normalizeContent,
     hashContent,
     isDuplicateContent,
+    hasColumn,
     verifyHCaptcha
 } from './Tools.js';
 import SqlFun from './SqlFun.js';
@@ -109,6 +110,8 @@ global.Tools.getTrustLevel = getTrustLevel;
 global.Tools.normalizeContent = normalizeContent;
 global.Tools.hashContent = hashContent;
 global.Tools.isDuplicateContent = isDuplicateContent;
+/* 挂载表字段存在性探测（n_hash 等后加列的兼容处理） */
+global.Tools.hasColumn = hasColumn;
 global.Tools.verifyHCaptcha = verifyHCaptcha;
 
 /* 挂载全站时区工具：业务层统一通过 global.Tools 取时区/格式化/生成 SQL 修饰符，避免各自硬编码 +8 */

@@ -11,15 +11,23 @@ let _timezone = DEFAULT_TIMEZONE;
 /* Intl.DateTimeFormat 实例缓存：避免每次格式化都重新构造，降低 CPU 开销 */
 const _formatterCache = new Map();
 
+/* 时区合法性结果缓存：Intl 构造是 Workers 中最昂贵的操作之一，同一时区只校验一次 */
+const _validCache = new Map();
+
 /* 校验 IANA 时区名是否合法：能被 Intl 接受即为合法 */
 export function isValidTimezone(tz) {
     if (typeof tz !== 'string' || !tz.trim()) return false;
+    const cached = _validCache.get(tz);
+    if (cached !== undefined) return cached;
+    let ok = true;
     try {
         new Intl.DateTimeFormat('en-US', { timeZone: tz });
-        return true;
     } catch (e) {
-        return false;
+        ok = false;
     }
+    if (_validCache.size >= 64) _validCache.clear();
+    _validCache.set(tz, ok);
+    return ok;
 }
 
 /* 设置当前时区；非法/空值回退默认，保证任何情况下格式化均可用 */
@@ -46,18 +54,28 @@ function getFormatter(tz) {
     return fmt;
 }
 
-/* 归一化入参：返回 { 日期各部分, 目标时区 } */
+/* 归一化入参：返回 { 日期, 目标时区 }
+   当前时区在 setTimezone 时已校验过，命中时直接返回，避免每次调用都走 isValidTimezone */
 function resolve(date, tz) {
-    return {
-        d: date instanceof Date ? date : new Date(date),
-        zone: isValidTimezone(tz) ? tz : DEFAULT_TIMEZONE
-    };
+    const d = date instanceof Date ? date : new Date(date);
+    const zone = (!tz || tz === _timezone)
+        ? _timezone
+        : (isValidTimezone(tz) ? tz : DEFAULT_TIMEZONE);
+    return { d, zone };
 }
+
+/* 时区偏移缓存：偏移只在夏令时切换时变化，按「时区 + 小时」缓存即可，
+   避免每次求偏移都走 Intl.formatToParts 的高开销路径 */
+const _offsetCache = new Map();
+const OFFSET_CACHE_LIMIT = 512;
 
 /* 计算指定时区在某一时刻相对 UTC 的分钟偏移（含夏令时）。
    原理：用 Intl 按目标时区格式化得到「墙上时间」，其与真实 UTC 时刻之差即偏移。 */
 export function getOffsetMinutes(tz = _timezone, date = new Date()) {
     const { d, zone } = resolve(date, tz);
+    const cachedKey = `${zone}|${Math.floor(d.getTime() / 3600000)}`;
+    const cached = _offsetCache.get(cachedKey);
+    if (cached !== undefined) return cached;
     try {
         const map = {};
         for (const p of getFormatter(zone).formatToParts(d)) map[p.type] = p.value;
@@ -66,23 +84,22 @@ export function getOffsetMinutes(tz = _timezone, date = new Date()) {
             Number(map.hour), Number(map.minute), Number(map.second)
         );
         /* 秒级对齐后再求差，避免毫秒位引入误差 */
-        return Math.round((asUTC - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+        const offset = Math.round((asUTC - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+        if (_offsetCache.size >= OFFSET_CACHE_LIMIT) _offsetCache.clear();
+        _offsetCache.set(cachedKey, offset);
+        return offset;
     } catch (e) {
         return 8 * 60;
     }
 }
 
-/* 将 Date 格式化为目标时区的 'YYYY-MM-DD HH:mm:ss'（同步，供 SqlFun 写库锚点使用） */
+/* 将 Date 格式化为目标时区的 'YYYY-MM-DD HH:mm:ss'（同步，供 SqlFun 写库锚点使用）
+   实现：先用缓存的整数偏移把时刻平移到「墙上时间」，再用 toISOString 截取，
+   完全绕开 formatToParts 的数组分配与遍历。 */
 export function formatDateTime(date = new Date(), tz = _timezone) {
     const { d, zone } = resolve(date, tz);
-    try {
-        const map = {};
-        for (const p of getFormatter(zone).formatToParts(d)) map[p.type] = p.value;
-        return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
-    } catch (e) {
-        /* 兜底：按 UTC 格式化 */
-        return d.toISOString().slice(0, 19).replace('T', ' ');
-    }
+    const offset = getOffsetMinutes(zone, d);
+    return new Date(d.getTime() + offset * 60000).toISOString().slice(0, 19).replace('T', ' ');
 }
 
 /* 仅日期 'YYYY-MM-DD' */

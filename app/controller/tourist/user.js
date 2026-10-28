@@ -3,37 +3,55 @@
 
 /* 批量补充统计数据（帖子/粉丝/关注/评论）、是否关注与勋章。
    列表页 GetUser 与预取接口 GetUsers 复用同一逻辑；users 为已剔除敏感字段的用户数组（每项须含 id）。
-   各项查询彼此独立，并行执行以减少 D1 往返次数；userIds 可能达 pagesize 上限，IN 列表需分片避免超出 D1 绑定参数上限 */
+   ids 不超过单语句参数上限时用 D1 batch 一次往返取全部结果，超出则按分片并发查询 */
 async function hydrateUsers(users, Ware) {
     if (!users || users.length === 0) return;
     const userIds = users.map(user => user.id);
     const ph = (arr) => arr.map(() => '?').join(',');
+    /* 需要按 uid 补充的统计语句（勋章只取下发用到的列，避免 SELECT m.* 带回冗余字段） */
+    const hasLikedQuery = !!(Ware && Ware.id);
+    const stmtCount = hasLikedQuery ? 6 : 5;
 
-    const tasks = [
-        /* 帖子数 */
-        global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT n_uid, COUNT(*) AS count FROM n_threads WHERE n_uid IN (${ph(c)}) GROUP BY n_uid`, c)),
-        /* 粉丝数 */
-        global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT n_tid, COUNT(*) AS count FROM n_user_like WHERE n_tid IN (${ph(c)}) GROUP BY n_tid`, c)),
-        /* 关注数 */
-        global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT n_uid, COUNT(*) AS count FROM n_user_like WHERE n_uid IN (${ph(c)}) GROUP BY n_uid`, c)),
-        /* 评论数 */
-        global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT n_uid, COUNT(*) AS count FROM n_comment WHERE n_uid IN (${ph(c)}) GROUP BY n_uid`, c)),
-        /* 用户勋章（LEFT JOIN，无勋章时 m.* 为 null） */
-        global.Tools.queryInChunks(userIds, (c) => global.db.query(`
-            SELECT ml.n_uid, m.*
-            FROM n_medal_log ml
-            LEFT JOIN n_medal m ON ml.n_mid = m.id
-            WHERE ml.n_uid IN (${ph(c)})
-        `, c))
-    ];
+    const buildStatements = (c) => {
+        const inList = ph(c);
+        const statements = [
+            { sql: `SELECT n_uid, COUNT(*) AS count FROM n_threads WHERE n_uid IN (${inList}) GROUP BY n_uid`, params: c },
+            { sql: `SELECT n_tid, COUNT(*) AS count FROM n_user_like WHERE n_tid IN (${inList}) GROUP BY n_tid`, params: c },
+            { sql: `SELECT n_uid, COUNT(*) AS count FROM n_user_like WHERE n_uid IN (${inList}) GROUP BY n_uid`, params: c },
+            { sql: `SELECT n_uid, COUNT(*) AS count FROM n_comment WHERE n_uid IN (${inList}) GROUP BY n_uid`, params: c },
+            {
+                sql: `SELECT ml.n_uid, m.id, m.n_name, m.n_src, m.n_type, m.n_threshold, m.n_sort
+                      FROM n_medal_log ml
+                      LEFT JOIN n_medal m ON ml.n_mid = m.id
+                      WHERE ml.n_uid IN (${inList})`,
+                params: c
+            }
+        ];
+        /* 当前登录用户是否关注了列表中的用户；语句含 1（Ware.id）+ 分片 ids */
+        if (hasLikedQuery) {
+            statements.push({ sql: `SELECT n_tid FROM n_user_like WHERE n_uid = ? AND n_tid IN (${inList})`, params: [Ware.id, ...c] });
+        }
+        return statements;
+    };
 
-    /* 当前登录用户是否关注了列表中的用户；语句含 1（Ware.id）+ 分片 ids，
-       故分片预算取 99 使单语句参数不超过 100 */
-    if (Ware && Ware.id) {
-        tasks.push(global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT n_tid FROM n_user_like WHERE n_uid = ? AND n_tid IN (${ph(c)})`, [Ware.id, ...c]), 99));
+    /* 记录所有分片的结果，最后按「第几条语句」归并 */
+    const groups = [];
+    if (userIds.length <= 99) {
+        /* 单分片：batch 一次往返（结果顺序与语句顺序一致） */
+        groups.push(await global.db.queryBatch(buildStatements(userIds)));
+    } else {
+        const shards = [];
+        for (let i = 0; i < userIds.length; i += 90) shards.push(userIds.slice(i, i + 90));
+        groups.push(...await Promise.all(shards.map(c => global.db.queryBatch(buildStatements(c)))));
     }
 
-    const [postCounts, followerCounts, followingCounts, commentCounts, userMedals, likedUsers] = await Promise.all(tasks);
+    const merged = Array.from({ length: stmtCount }, () => []);
+    for (const group of groups) {
+        for (let i = 0; i < stmtCount; i++) merged[i].push(...group[i]);
+    }
+
+    const [postCounts, followerCounts, followingCounts, commentCounts, userMedals] = merged;
+    const likedUsers = hasLikedQuery ? merged[5] : null;
 
     /* 将统计数据映射到每个用户 */
     const getCountMap = (data, keyField) => {
@@ -87,45 +105,72 @@ export default {
                 }
                 pre.id = Ware.id;
             }
-            const res = await global.db.query('SELECT * FROM n_users WHERE id = ?', [pre.id])
-            if (res.length == 0) {
+            /* 回源逻辑：基础信息（列白名单）+ 统计/关注关系/勋章（三组独立查询并行） */
+            const fetchDetail = async () => {
+                const fields = await global.db.selectFields('n_users', global.SENSITIVE_USER_FIELDS || []);
+                const res = await global.db.query(`SELECT ${fields} FROM n_users WHERE id = ?`, [pre.id])
+                if (res.length == 0) return null;
+                const thread = res[0];
+                /* 统计、关注关系、勋章三组查询彼此独立，并行执行减少 D1 往返 */
+                const statsPromise = global.db.query(`
+                    SELECT
+                        (SELECT COUNT(*) FROM n_threads WHERE n_uid = ?) AS n_posts,
+                        (SELECT COUNT(*) FROM n_user_like WHERE n_tid = ?) AS n_followers,
+                        (SELECT COUNT(*) FROM n_user_like WHERE n_uid = ?) AS n_following,
+                        (SELECT COUNT(*) FROM n_comment WHERE n_uid = ?) AS n_comment
+                `, [thread.id, thread.id, thread.id, thread.id]);
+                const likedPromise = (Ware && Ware.id)
+                    ? global.db.query(`SELECT COUNT(*) FROM n_user_like WHERE n_tid = ? AND n_uid = ?`, [pre.id, Ware.id])
+                    : null;
+                const medalsPromise = global.db.query(`
+                    SELECT m.id, m.n_name, m.n_src, m.n_type, m.n_threshold, m.n_sort
+                    FROM n_medal_log ml
+                    LEFT JOIN n_medal m ON ml.n_mid = m.id
+                    WHERE ml.n_uid = ?
+                `, [thread.id]);
+
+                const [userStats, isLiked, medals] = await Promise.all([statsPromise, likedPromise, medalsPromise]);
+
+                thread.posts = userStats[0].n_posts;
+                thread.followers = userStats[0].n_followers;
+                thread.following = userStats[0].n_following;
+                thread.n_comment = userStats[0].n_comment;
+
+                /* 是否关注 */
+                if (isLiked) {
+                    thread.isLiked = isLiked[0]['COUNT(*)'] > 0;
+                }
+
+                /* 用户勋章 */
+                thread.medals = medals;
+                return thread;
+            };
+
+            /* 仅纯游客走缓存：登录用户需返回 isLiked（个人化），不缓存。
+               两级：isolate 内存 10s → KV 60s，缓存完整响应文本 */
+            if (!(Ware && Ware.id) && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
+                const cacheKey = 'user:detail:v1:' + (pre.id || '');
+                const bodyText = await global.RedisUtils.getOrSetMemoryCache('user:detail:l1:' + cacheKey, 10, () =>
+                    global.RedisUtils.getOrSetTextCache(cacheKey, 60, async () => {
+                        const row = await fetchDetail();
+                        /* 空串表示用户不存在：可被内存缓存复用，但避免把 null 写入 KV */
+                        if (!row) return '';
+                        return JSON.stringify({ code: 200, msg: '获取成功', data: row, total: 0 });
+                    })
+                );
+                if (!bodyText) {
+                    global.sendMsg(reply, 404, '用户不存在');
+                    return;
+                }
+                reply.sendJsonText(bodyText);
+                return;
+            }
+
+            const thread = await fetchDetail();
+            if (!thread) {
                 global.sendMsg(reply, 404, '用户不存在');
                 return;
             }
-            const thread = res[0];
-            /* 清除敏感字段，避免对外返回密码哈希、邮箱、手机号、余额等 */
-            for (const field of (global.SENSITIVE_USER_FIELDS || [])) delete thread[field];
-            /* 使用单次查询获取用户统计数据 */
-            const userStats = await global.db.query(`
-                SELECT
-                    (SELECT COUNT(*) FROM n_threads WHERE n_uid = ?) AS n_posts,
-                    (SELECT COUNT(*) FROM n_user_like WHERE n_tid = ?) AS n_followers,
-                    (SELECT COUNT(*) FROM n_user_like WHERE n_uid = ?) AS n_following,
-                    (SELECT COUNT(*) FROM n_comment WHERE n_uid = ?) AS n_comment
-            `, [thread.id, thread.id, thread.id, thread.id]);
-            thread.posts = userStats[0].n_posts;
-            thread.followers = userStats[0].n_followers;
-            thread.following = userStats[0].n_following;
-            thread.n_comment = userStats[0].n_comment;
-
-
-            /* 是否关注 */
-            if (Ware && Ware.id) {
-                const isLiked = await global.db.query(`SELECT COUNT(*) FROM n_user_like WHERE n_tid = ? AND n_uid = ?`, [pre.id, Ware.id || 0]);
-                thread.isLiked = isLiked[0]['COUNT(*)'] > 0;
-            }
-
-            /* 获取用户勋章 */
-            const medals = await global.db.query(`
-                SELECT m.*
-                FROM n_medal_log ml
-                LEFT JOIN n_medal m ON ml.n_mid = m.id
-                WHERE ml.n_uid = ?
-            `, [thread.id]);
-
-            thread.medals = medals;
-            
-
             global.sendMsg(reply, 200, '获取成功', thread);
             return;
         }
@@ -183,12 +228,28 @@ export default {
         }
         const Ware = request.Ware;
         const ph = ids.map(() => '?').join(',');
-        const users = await global.db.query(`SELECT * FROM n_users WHERE id IN (${ph})`, ids);
-        /* 清除敏感字段，避免对外返回密码哈希、邮箱、手机号、余额等 */
-        for (const user of users) {
-            for (const field of (global.SENSITIVE_USER_FIELDS || [])) delete user[field];
+        /* 回源逻辑：列白名单查询 + 批量补充统计/关注/勋章 */
+        const fetchUsers = async () => {
+            /* 列白名单：直接在 SQL 层排除敏感字段，避免 SELECT * 再逐用户 delete */
+            const fields = await global.db.selectFields('n_users', global.SENSITIVE_USER_FIELDS || []);
+            const users = await global.db.query(`SELECT ${fields} FROM n_users WHERE id IN (${ph})`, ids);
+            await hydrateUsers(users, Ware);
+            return users;
+        };
+
+        /* 列表页高频预取（每次滚动/翻页都会命中相同 ids 组合）：游客结果只依赖 ids，
+           缓存完整响应文本 10s。仅放 isolate 内存不写 KV——键基数大，写 KV 不划算 */
+        if (!(Ware && Ware.id) && global.RedisUtils && global.RedisUtils.getOrSetMemoryCache) {
+            const cacheKey = 'user:batch:v1:' + ids.slice().sort().join(',');
+            const bodyText = await global.RedisUtils.getOrSetMemoryCache(cacheKey, 10, async () => {
+                const users = await fetchUsers();
+                return JSON.stringify({ code: 200, msg: '获取成功', data: users, total: 0 });
+            });
+            reply.sendJsonText(bodyText);
+            return;
         }
-        await hydrateUsers(users, Ware);
+
+        const users = await fetchUsers();
         global.sendMsg(reply, 200, '获取成功', users);
     })
 

@@ -10,6 +10,24 @@ export function clearMedalCache() {
     medalCache = { data: null, expire: 0 };
 }
 
+/* 勋章分配节流：发帖/评论/点赞等热点动作都会触发 AssignMedal，
+   其 5 组聚合统计 + 勋章比对开销不小。同一用户 30s 内只跑一次，
+   避免连续操作重复计算（勋章属激励性数据，允许轻微延迟）。 */
+const ASSIGN_THROTTLE_TTL = 30 * 1000;
+const ASSIGN_THROTTLE_MAX = 2000;
+const _assignThrottle = new Map();
+
+function shouldSkipAssign(id) {
+    /* 统一转字符串：同一用户可能以 number（D1 取数）或 string（表单入参）传入 */
+    const key = String(id);
+    const now = Date.now();
+    const last = _assignThrottle.get(key);
+    if (last && now - last < ASSIGN_THROTTLE_TTL) return true;
+    if (_assignThrottle.size >= ASSIGN_THROTTLE_MAX) _assignThrottle.clear();
+    _assignThrottle.set(key, now);
+    return false;
+}
+
 /* 读取勋章定义（带短 TTL 缓存） */
 async function getMedalDefs() {
     const now = Date.now();
@@ -22,6 +40,7 @@ async function getMedalDefs() {
 export default {
     /* 分配勋章 */
     AssignMedal: async (id) => {
+        if (!id || shouldSkipAssign(id)) return;
         /* 三个读取互不依赖，并行发起以减少 D1 往返延迟 */
         const [userStats, medals, userMedals] = await Promise.all([
             global.db.query(`

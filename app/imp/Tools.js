@@ -275,6 +275,8 @@ export async function getConfig() {
 
 export function clearConfigCache() {
   _configCache = { data: null, expire: 0 };
+  /* 同步清理派生的公开站点信息缓存（webinfo 直接复用配置全表） */
+  global.RedisUtils?.clearMemoryCache?.('webinfo:');
 }
 
 /* 验证码校验防爆破：同一标识连续错误上限，以及失败计数的存活时间（与验证码 10 分钟有效期对齐） */
@@ -443,9 +445,21 @@ export function chunkArray(values, size = MAX_BATCH_IDS) {
 export async function queryInChunks(values, run, budget = MAX_BATCH_IDS) {
   const list = Array.isArray(values) ? values : [];
   if (!list.length) return [];
+  const chunks = chunkArray(list, budget);
+  /* 分片之间互不依赖，并行执行以缩短列表接口的总等待；结果仍按分片顺序拼接。
+     并发度限制为 6：单次 Worker 调用最多只能同时打开 6 个 D1 连接，
+     超出会排队甚至报错，故用固定宽度的滑动窗口而不是无上限 Promise.all */
+  const results = new Array(chunks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < chunks.length) {
+      const index = next++;
+      results[index] = await run(chunks[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, chunks.length) }, worker));
   const out = [];
-  for (const chunk of chunkArray(list, budget)) {
-    const rows = await run(chunk);
+  for (const rows of results) {
     if (rows && rows.length) out.push(...rows);
   }
   return out;
@@ -621,25 +635,68 @@ export async function acquireCooldown(key, ttlSeconds) {
  * 中间件比对该时间戳与 token 内 iat，早于撤销时间戳的旧 token 判失效；之后重新登录签发的新 token 不受影响。
  * TTL 取 token 最长有效期（过期后旧 token 本身已失效，撤销戳无需长期保留）。
  * KV 不可用时退化为实例内内存记录（尽力而为，仅本实例生效）。
+ *
+ * 性能：每个已登录请求都会调用 isTokenRevoked，直接读 KV 会产生一次读写额度与额外延迟。
+ * 这里在 isolate 内加一层短 TTL memo：本实例撤销后立即写入 memo（同实例即时生效），
+ * 其他实例最迟 REVOKE_MEMO_TTL 秒后感知（KV 本身最终一致，无法更强）。
  */
+const REVOKE_MEMO_TTL = 30;
+const REVOKE_MEMO_MAX = 5000;
+const revokeMemo = new Map();
+
+function revokeMemoGet(tokenType, id) {
+  const key = `${tokenType}:${id}`;
+  const item = revokeMemo.get(key);
+  if (!item) return null;
+  if (item.expireAt <= Date.now()) { revokeMemo.delete(key); return null; }
+  return item.revokedAt;
+}
+
+function revokeMemoSet(tokenType, id, revokedAt, ttlSeconds) {
+  const key = `${tokenType}:${id}`;
+  revokeMemo.set(key, { revokedAt, expireAt: Date.now() + Math.max(1, ttlSeconds) * 1000 });
+  /* 容量控制：先清过期项，仍超限则按插入顺序淘汰最旧项 */
+  if (revokeMemo.size > REVOKE_MEMO_MAX) {
+    const now = Date.now();
+    for (const [k, v] of revokeMemo) {
+      if (v.expireAt <= now) revokeMemo.delete(k);
+    }
+    while (revokeMemo.size > REVOKE_MEMO_MAX) {
+      revokeMemo.delete(revokeMemo.keys().next().value);
+    }
+  }
+}
+
 export async function revokeToken(tokenType, id) {
   if (id === undefined || id === null) return false;
   const ttl = tokenType === 'admin' ? global.CONFIG.adminToken.expiresIn : global.CONFIG.userToken.expiresIn;
+  const now = Date.now();
   if (!global.RedisUtils) {
-    memorySet(`${tokenType}:revoke:${id}`, Date.now(), ttl);
+    memorySet(`${tokenType}:revoke:${id}`, now, ttl);
+    revokeMemoSet(tokenType, id, now, ttl);
     return true;
   }
-  return global.RedisUtils.setCache(`${tokenType}:revoke:${id}`, Date.now(), ttl);
+  const ok = await global.RedisUtils.setCache(`${tokenType}:revoke:${id}`, now, ttl);
+  /* 仅在写入成功后更新 memo，避免 KV 写失败时本实例误判为已撤销 */
+  if (ok) revokeMemoSet(tokenType, id, now, ttl);
+  return ok;
 }
 
 /* 判断 token 是否已被撤销：撤销时间戳晚于 token 的签发时间（iat）即失效 */
 export async function isTokenRevoked(tokenType, data) {
   if (!data || data.id === undefined || data.id === null) return false;
+  const iat = Number(data.iat) || 0;
+
+  const memoized = revokeMemoGet(tokenType, data.id);
+  if (memoized !== null) return memoized > iat;
+
   const revokedAt = global.RedisUtils
     ? Number(await global.RedisUtils.getCache(`${tokenType}:revoke:${data.id}`)) || 0
     : memoryGet(`${tokenType}:revoke:${data.id}`) || 0;
+  /* 未撤销也缓存一个短 TTL，避免同一 isolate 内每个请求都打 KV */
+  revokeMemoSet(tokenType, data.id, revokedAt, revokedAt ? REVOKE_MEMO_TTL * 10 : REVOKE_MEMO_TTL);
   if (!revokedAt) return false;
-  return revokedAt > (Number(data.iat) || 0);
+  return revokedAt > iat;
 }
 
 /*
@@ -749,20 +806,51 @@ export async function hashContent(raw) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/* 判定同一用户近期是否发布过相同内容；type 仅接受 'thread' / 'comment'，表名走白名单避免注入 */
-export async function isDuplicateContent(uid, raw, type = 'thread') {
+/* 列存在性探测（isolate 级缓存）：
+   n_hash 是后加列，旧库未执行迁移时并不存在。写入/去重前探测一次，
+   不存在则自动退回旧逻辑，避免「先上线代码、后迁移库」的顺序问题导致发帖/评论报错。 */
+const _columnExistsCache = new Map();
+export async function hasColumn(table, column) {
+  /* 表名做标识符白名单校验（拼接进 PRAGMA），非法直接按不存在处理 */
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) return false;
+  const key = `${table}.${column}`;
+  const cached = _columnExistsCache.get(key);
+  if (cached !== undefined) return cached;
+  let exists = false;
+  try {
+    const info = await global.db.query(`PRAGMA table_info(\`${table}\`)`);
+    exists = info.some((col) => col.name === column);
+  } catch (error) {
+    /* 探测失败不缓存，留待下次请求重试 */
+    console.error('探测表字段失败:', error);
+    return false;
+  }
+  _columnExistsCache.set(key, exists);
+  return exists;
+}
+
+/* 判定同一用户近期是否发布过相同内容；type 仅接受 'thread' / 'comment'，表名走白名单避免注入。
+   precomputedHash 可传入调用方已算好的哈希，避免写入路径重复计算 */
+export async function isDuplicateContent(uid, raw, type = 'thread', precomputedHash) {
   const table = DEDUPE_TABLES[type];
   if (!table || uid === undefined || uid === null || uid === '') return false;
-  const hash = await hashContent(raw);
+  const hash = precomputedHash !== undefined ? precomputedHash : await hashContent(raw);
   if (!hash) return false;
 
   /* n_time 为 'YYYY-MM-DD HH:mm:ss' 文本，按同格式字符串比较即可 */
   const cutoff = formatDateTime(new Date(Date.now() - DEDUPE_WINDOW_SECONDS * 1000));
+  const useHash = await hasColumn(table, 'n_hash');
+  /* 有 n_hash 列时直接比哈希，不再对每条候选正文重复计算 SHA-256 */
   const rows = await global.db.query(
-    `SELECT n_html FROM ${table} WHERE n_uid = ? AND n_time >= ? ORDER BY id DESC LIMIT ${DEDUPE_SCAN_LIMIT}`,
+    `SELECT ${useHash ? 'n_hash, ' : ''}n_html FROM ${table} WHERE n_uid = ? AND n_time >= ? ORDER BY id DESC LIMIT ${DEDUPE_SCAN_LIMIT}`,
     [uid, cutoff]
   );
   for (const row of rows) {
+    if (row.n_hash) {
+      if (row.n_hash === hash) return true;
+      continue;
+    }
+    /* 加列前的历史数据 n_hash 为空：退化为即时计算，保证去重不出现空窗 */
     if (await hashContent(row.n_html) === hash) return true;
   }
   return false;

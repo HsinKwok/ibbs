@@ -31,9 +31,10 @@ export default {
 
         /* 缓存键需覆盖全部筛选条件；参数用 JSON 序列化，避免用户输入含冒号导致键碰撞 */
         const type = pre.type === '' || pre.type == null ? 1 : pre.type;
-        const cacheKey = 'category:list:' + JSON.stringify([pre.search || '', type, pre.page || 1, pre.pagesize || 20]);
+        const cacheKey = 'category:list:v1:' + JSON.stringify([pre.search || '', type, pre.page || 1, pre.pagesize || 20]);
 
-        const res = await cached(cacheKey, async () => {
+        /* 缓存已序列化的响应文本：命中时零反序列化，也省掉分页对象的再次 stringify */
+        const bodyText = await cached(cacheKey, async () => {
             const SqlBuilder = new global.SqlBuilder();
             const sql = SqlBuilder.add('n_name', pre.search, 'like').add('n_type', type).build();
             const data = await global.db.getPaginatedData('n_class', sql.sql, sql.params, ['n_sort', 'desc'], pre.page, pre.pagesize)
@@ -49,10 +50,10 @@ export default {
                 const countMap = counts.reduce((m, r) => { m[r.id] = r.c; return m; }, {});
                 data.data.forEach(c => { c.n_threads = countMap[c.id] || 0; });
             }
-            return data;
+            return JSON.stringify({ code: 200, msg: '获取成功', data: data.data, total: data.total });
         });
 
-        global.sendMsg(reply, 200, '获取成功', res.data, res.total);
+        reply.sendJsonText(bodyText);
     })
 
 }

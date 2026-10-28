@@ -137,18 +137,19 @@ CREATE TABLE `n_comment`  (
   `n_tid` INTEGER NULL DEFAULT NULL,
   `n_uid` INTEGER NULL DEFAULT NULL,
   `n_cid` INTEGER NULL DEFAULT NULL,
-  `n_time` TEXT NULL DEFAULT NULL
+  `n_time` TEXT NULL DEFAULT NULL,
+  `n_hash` TEXT NULL DEFAULT NULL
 );
 
 -- ----------------------------
 -- Records of n_comment
 -- ----------------------------
-INSERT INTO `n_comment` VALUES (21, '是不是忘了放链接了', 41, 3, 0, '2026-01-18 19:26:56');
-INSERT INTO `n_comment` VALUES (22, '发帖的简介有点多余。去掉，保留正文即可。', 42, 18, 0, '2026-01-18 20:22:38');
-INSERT INTO `n_comment` VALUES (23, '应该加个楼层数', 42, 18, 0, '2026-01-18 20:23:26');
-INSERT INTO `n_comment` VALUES (24, '好的 我记住了', 42, 3, 0, '2026-01-18 20:25:04');
-INSERT INTO `n_comment` VALUES (25, '多多', 37, 3, 0, '2026-01-19 00:07:16');
-INSERT INTO `n_comment` VALUES (26, '如有其他问题，可以这里反馈，我会进行解答', 49, 3, 0, '2026-01-23 17:12:06');
+INSERT INTO `n_comment` VALUES (21, '是不是忘了放链接了', 41, 3, 0, '2026-01-18 19:26:56', NULL);
+INSERT INTO `n_comment` VALUES (22, '发帖的简介有点多余。去掉，保留正文即可。', 42, 18, 0, '2026-01-18 20:22:38', NULL);
+INSERT INTO `n_comment` VALUES (23, '应该加个楼层数', 42, 18, 0, '2026-01-18 20:23:26', NULL);
+INSERT INTO `n_comment` VALUES (24, '好的 我记住了', 42, 3, 0, '2026-01-18 20:25:04', NULL);
+INSERT INTO `n_comment` VALUES (25, '多多', 37, 3, 0, '2026-01-19 00:07:16', NULL);
+INSERT INTO `n_comment` VALUES (26, '如有其他问题，可以这里反馈，我会进行解答', 49, 3, 0, '2026-01-23 17:12:06', NULL);
 
 -- ----------------------------
 -- Table structure for n_configuration
@@ -496,13 +497,14 @@ CREATE TABLE `n_threads`  (
   `n_resources` TEXT NULL,
   `n_haveimage` TEXT NULL DEFAULT NULL,
   `n_havevideo` TEXT NULL DEFAULT NULL,
-  `n_msglastTime` TEXT NULL DEFAULT NULL
+  `n_msglastTime` TEXT NULL DEFAULT NULL,
+  `n_hash` TEXT NULL DEFAULT NULL
 );
 
 -- ----------------------------
 -- Records of n_threads
 -- ----------------------------
-INSERT INTO `n_threads` VALUES (18, '各位大佬 多多指教', 3, '2026-01-17 19:24:23', '<p>你自己就是大家</p>', '12', 0, 0, '记得第一次写第一行代码的惆怅到…', '1', 0.00, '[]', '2', '2', NULL);
+INSERT INTO `n_threads` VALUES (18, '各位大佬 多多指教', 3, '2026-01-17 19:24:23', '<p>你自己就是大家</p>', '12', 0, 0, '记得第一次写第一行代码的惆怅到…', '1', 0.00, '[]', '2', '2', NULL, NULL);
 
 -- ----------------------------
 -- Table structure for n_threads_buy
@@ -774,6 +776,14 @@ CREATE TABLE `n_market`  (
 );
 
 -- =============================================================
+-- 存量库升级（schema 变更，按需手动执行一次）
+-- 已有数据库请勿重跑上面的 DROP/CREATE（会清空数据），只执行：
+--   ALTER TABLE `n_threads` ADD COLUMN `n_hash` TEXT NULL DEFAULT NULL;
+--   ALTER TABLE `n_comment` ADD COLUMN `n_hash` TEXT NULL DEFAULT NULL;
+-- 未执行迁移时程序会自动跳过 n_hash 写入、回退到旧去重逻辑，不影响正常发帖/评论。
+-- =============================================================
+
+-- =============================================================
 -- 二级索引
 -- 全部使用 IF NOT EXISTS，可安全重复执行（幂等）
 -- =============================================================
@@ -784,10 +794,18 @@ CREATE INDEX IF NOT EXISTS `idx_users_registertime` ON `n_users` (`n_registertim
 CREATE INDEX IF NOT EXISTS `idx_threads_uid`       ON `n_threads` (`n_uid`);
 CREATE INDEX IF NOT EXISTS `idx_threads_haveimage` ON `n_threads` (`n_haveimage`);
 CREATE INDEX IF NOT EXISTS `idx_threads_havevideo` ON `n_threads` (`n_havevideo`);
+-- 内容去重按「用户 + 时间窗」扫描，复合索引避免回表扫全用户帖子
+CREATE INDEX IF NOT EXISTS `idx_threads_uid_time`  ON `n_threads` (`n_uid`, `n_time`);
+-- 今日/区间统计与按时间筛选
+CREATE INDEX IF NOT EXISTS `idx_threads_time`      ON `n_threads` (`n_time`);
 CREATE INDEX IF NOT EXISTS `idx_tclist_tid`      ON `n_tclist` (`n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_tclist_cid_type` ON `n_tclist` (`n_cid`, `n_type`);
 CREATE INDEX IF NOT EXISTS `idx_comment_tid` ON `n_comment` (`n_tid`);
+-- 评论列表按帖子分页（WHERE n_tid=? ORDER BY id DESC）走复合索引，避免临时排序
+CREATE INDEX IF NOT EXISTS `idx_comment_tid_id` ON `n_comment` (`n_tid`, `id`);
 CREATE INDEX IF NOT EXISTS `idx_comment_uid` ON `n_comment` (`n_uid`);
+-- 内容去重按「用户 + 时间窗」扫描，复合索引避免回表扫全用户评论
+CREATE INDEX IF NOT EXISTS `idx_comment_uid_time` ON `n_comment` (`n_uid`, `n_time`);
 CREATE INDEX IF NOT EXISTS `idx_threads_like_uid_tid` ON `n_threads_like` (`n_uid`, `n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_threads_like_tid`     ON `n_threads_like` (`n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_threads_buy_uid_tid` ON `n_threads_buy` (`n_uid`, `n_tid`);
@@ -801,6 +819,8 @@ CREATE INDEX IF NOT EXISTS `idx_user_msg_from` ON `n_user_msg` (`n_from`);
 CREATE INDEX IF NOT EXISTS `idx_user_msg_to`   ON `n_user_msg` (`n_to`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_no`  ON `n_payorder` (`n_no`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_uid` ON `n_payorder` (`n_uid`);
+-- 后台统计按「类型 + 时间范围」聚合流水，避免全表扫描
+CREATE INDEX IF NOT EXISTS `idx_payorder_type_time` ON `n_payorder` (`n_type`, `n_paytime`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_item_oid` ON `n_payorder_item` (`n_oid`);
 CREATE INDEX IF NOT EXISTS `idx_withdrawlog_uid` ON `n_withdrawlog` (`n_uid`);
 CREATE INDEX IF NOT EXISTS `idx_medal_log_uid` ON `n_medal_log` (`n_uid`);

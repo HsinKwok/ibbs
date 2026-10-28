@@ -58,7 +58,10 @@ function fromCodePoint(code) {
 
 /* 解码 HTML 实体：属性值由 HTML 解析器做实体解码，需先还原再校验协议，避免 `javascript&#58;` 绕过 */
 function decodeEntities(str) {
-    return String(str)
+    const s = String(str);
+    /* 快速路径：不含 & 时三个正则都不可能有匹配，直接返回 */
+    if (s.indexOf('&') === -1) return s;
+    return s
         .replace(/&#x([0-9a-f]{1,6});?/gi, (_, hex) => fromCodePoint(parseInt(hex, 16)))
         .replace(/&#(\d{1,7});?/g, (_, dec) => fromCodePoint(parseInt(dec, 10)))
         .replace(/&([a-z]+);/gi, (m, name) => {
@@ -67,13 +70,12 @@ function decodeEntities(str) {
         });
 }
 
+/* 属性值转义表：单趟替换，替代原先的 4 次全文 replace */
+const ATTR_ESCAPE = { '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' };
+
 /* 转义属性值，避免破坏标签结构；先转义 & 以中和残留的实体编码 */
 function escapeAttr(value) {
-    return String(value)
-        .replace(/&/g, '&amp;')
-        .replace(/"/g, '&quot;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    return String(value).replace(/[&"<>]/g, (c) => ATTR_ESCAPE[c]);
 }
 
 /* 过滤单个标签上的属性串 */
@@ -107,6 +109,10 @@ function filterAttrs(attrStr) {
  */
 export default function Sanitize(html) {
     if (typeof html !== 'string' || html === '') return html;
+
+    /* 快速路径：后续所有规则都只在出现 '<' 时才可能生效（注释/标签），
+       纯文本可直接返回，省掉全文正则扫描 */
+    if (html.indexOf('<') === -1) return html;
 
     let out = html;
 

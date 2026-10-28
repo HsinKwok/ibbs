@@ -22,13 +22,15 @@ export default {
             global.sendMsg(reply, 200, '获取成功', row);
             return
         }
-        const cacheKey = 'swipers:list:' + JSON.stringify([pre.search || '', pre.pos || '', pre.page || 1, pre.pagesize || 20]);
-        const res = await cached(cacheKey, async () => {
+        const cacheKey = 'swipers:list:v1:' + JSON.stringify([pre.search || '', pre.pos || '', pre.page || 1, pre.pagesize || 20]);
+        /* 缓存已序列化的响应文本：命中时零反序列化，省掉分页对象的再次 stringify */
+        const bodyText = await cached(cacheKey, async () => {
             const SqlBuilder = new global.SqlBuilder();
             const sql = SqlBuilder.add('n_name', pre.search, 'like').add('n_pos', pre.pos).build();
-            return global.db.getPaginatedData('n_swipers', sql.sql, sql.params, ['n_sort', 'desc'], pre.page, pre.pagesize)
+            const data = await global.db.getPaginatedData('n_swipers', sql.sql, sql.params, ['n_sort', 'desc'], pre.page, pre.pagesize)
+            return JSON.stringify({ code: 200, msg: '获取成功', data: data.data, total: data.total });
         })
-        global.sendMsg(reply, 200, '获取成功', res.data, res.total);
+        reply.sendJsonText(bodyText);
     })
 
 }

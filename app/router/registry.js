@@ -1,99 +1,77 @@
 // 静态控制器与中间件注册表
 // Cloudflare Workers 无法在运行时按计算出的路径动态 import，
-// 因此这里在构建期静态导入所有控制器与中间件，供路由分发使用。
+// 因此这里在构建期静态列出所有控制器与中间件的加载器，供路由分发使用。
 
-// ---------- 控制器 ----------
-import api from '../controller/api.js';
-import upload from '../controller/upload.js';
-import email from '../controller/email.js';
-import touristClass from '../controller/tourist/class.js';
-import touristNotices from '../controller/tourist/notices.js';
-import touristSwipers from '../controller/tourist/swipers.js';
-import touristThreads from '../controller/tourist/threads.js';
-import touristUser from '../controller/tourist/user.js';
-import userThreads from '../controller/user/threads.js';
-import userMarket from '../controller/user/market.js';
-import userMedal from '../controller/user/medal.js';
-import userLogin from '../controller/user/Frame/login.js';
-import userFrameInfo from '../controller/user/Frame/info.js';
-import userBill from '../controller/user/Frame/bill.js';
-import userVip from '../controller/user/Frame/vip.js';
-import userWithdraw from '../controller/user/Frame/withdraw.js';
-import userMsg from '../controller/user/Frame/msg.js';
-import userChat from '../controller/user/Frame/chat.js';
-import userNotices from '../controller/user/Frame/notices.js';
-import userOrderPay from '../controller/user/Frame/orderPay.js';
-import userActivity from '../controller/user/Frame/activity.js';
-import userCheckIn from '../controller/user/Frame/activity/checkIn.js';
-import userAcquisition from '../controller/user/Frame/activity/userAcquisition.js';
-import userSocket from '../controller/user/Frame/scoket/index.js';
-import adminLogin from '../controller/Admin/Frame/login.js';
-import adminUsers from '../controller/Admin/Frame/users.js';
-import adminWeb from '../controller/Admin/Frame/web.js';
-import adminNotices from '../controller/Admin/Frame/notices.js';
-import adminMsg from '../controller/Admin/Frame/msg.js';
-import adminSwieprs from '../controller/Admin/Frame/swieprs.js';
-import adminEmailTemplate from '../controller/Admin/Frame/emailTemplate.js';
-import adminNavigation from '../controller/Admin/Frame/navigation.js';
-import adminActivity from '../controller/Admin/Frame/activity.js';
-import adminPayMethod from '../controller/Admin/Frame/Pay/payMethod.js';
-import adminPayConfig from '../controller/Admin/Frame/Pay/payConfig.js';
-import adminPayOrder from '../controller/Admin/Frame/Pay/payOrder.js';
-import adminStatistics from '../controller/Admin/Frame/Statistics/index.js';
-import adminCategory from '../controller/Admin/category.js';
-import adminMedal from '../controller/Admin/medal.js';
-import adminThreads from '../controller/Admin/threads.js';
-import adminMarket from '../controller/Admin/market.js';
-
-export const controllers = new Map([
-    ['api', api],
-    ['upload', upload],
-    ['email', email],
-    ['tourist/class', touristClass],
-    ['tourist/notices', touristNotices],
-    ['tourist/swipers', touristSwipers],
-    ['tourist/threads', touristThreads],
-    ['tourist/user', touristUser],
-    ['user/threads', userThreads],
-    ['user/market', userMarket],
-    ['user/medal', userMedal],
-    ['user/Frame/login', userLogin],
-    ['user/Frame/info', userFrameInfo],
-    ['user/Frame/bill', userBill],
-    ['user/Frame/vip', userVip],
-    ['user/Frame/withdraw', userWithdraw],
-    ['user/Frame/msg', userMsg],
-    ['user/Frame/chat', userChat],
-    ['user/Frame/notices', userNotices],
-    ['user/Frame/orderPay', userOrderPay],
-    ['user/Frame/activity', userActivity],
-    ['user/Frame/activity/checkIn', userCheckIn],
-    ['user/Frame/activity/userAcquisition', userAcquisition],
-    ['user/Frame/scoket/index', userSocket],
-    ['Admin/Frame/login', adminLogin],
-    ['Admin/Frame/users', adminUsers],
-    ['Admin/Frame/web', adminWeb],
-    ['Admin/Frame/notices', adminNotices],
-    ['Admin/Frame/msg', adminMsg],
-    ['Admin/Frame/swieprs', adminSwieprs],
-    ['Admin/Frame/emailTemplate', adminEmailTemplate],
-    ['Admin/Frame/navigation', adminNavigation],
-    ['Admin/Frame/activity', adminActivity],
-    ['Admin/Frame/Pay/payMethod', adminPayMethod],
-    ['Admin/Frame/Pay/payConfig', adminPayConfig],
-    ['Admin/Frame/Pay/payOrder', adminPayOrder],
-    ['Admin/Frame/Statistics/index', adminStatistics],
-    ['Admin/category', adminCategory],
-    ['Admin/medal', adminMedal],
-    ['Admin/threads', adminThreads],
-    ['Admin/market', adminMarket],
-]);
-
-// ---------- 中间件 ----------
+// 中间件体量小且几乎每个请求都会用到，保持静态导入
 import NoMestUTokenVar from './Ware/NoMestUTokenVar.js';
 import UTokenVar from './Ware/UTokenVar.js';
 import ATokenVar from './Ware/ATokenVar.js';
 
+// ---------- 控制器（惰性加载） ----------
+// 控制器模块改为动态 import()：构建时仍被打包进产物，但模块顶层代码推迟到
+// 该控制器首次被命中时执行，冷启动只需初始化公共层与热路径模块。
+const loaders = new Map([
+    ['api', () => import('../controller/api.js')],
+    ['upload', () => import('../controller/upload.js')],
+    ['email', () => import('../controller/email.js')],
+    ['tourist/class', () => import('../controller/tourist/class.js')],
+    ['tourist/notices', () => import('../controller/tourist/notices.js')],
+    ['tourist/swipers', () => import('../controller/tourist/swipers.js')],
+    ['tourist/threads', () => import('../controller/tourist/threads.js')],
+    ['tourist/user', () => import('../controller/tourist/user.js')],
+    ['user/threads', () => import('../controller/user/threads.js')],
+    ['user/market', () => import('../controller/user/market.js')],
+    ['user/medal', () => import('../controller/user/medal.js')],
+    ['user/Frame/login', () => import('../controller/user/Frame/login.js')],
+    ['user/Frame/info', () => import('../controller/user/Frame/info.js')],
+    ['user/Frame/bill', () => import('../controller/user/Frame/bill.js')],
+    ['user/Frame/vip', () => import('../controller/user/Frame/vip.js')],
+    ['user/Frame/withdraw', () => import('../controller/user/Frame/withdraw.js')],
+    ['user/Frame/msg', () => import('../controller/user/Frame/msg.js')],
+    ['user/Frame/chat', () => import('../controller/user/Frame/chat.js')],
+    ['user/Frame/notices', () => import('../controller/user/Frame/notices.js')],
+    ['user/Frame/orderPay', () => import('../controller/user/Frame/orderPay.js')],
+    ['user/Frame/activity', () => import('../controller/user/Frame/activity.js')],
+    ['user/Frame/activity/checkIn', () => import('../controller/user/Frame/activity/checkIn.js')],
+    ['user/Frame/activity/userAcquisition', () => import('../controller/user/Frame/activity/userAcquisition.js')],
+    ['user/Frame/scoket/index', () => import('../controller/user/Frame/scoket/index.js')],
+    ['Admin/Frame/login', () => import('../controller/Admin/Frame/login.js')],
+    ['Admin/Frame/users', () => import('../controller/Admin/Frame/users.js')],
+    ['Admin/Frame/web', () => import('../controller/Admin/Frame/web.js')],
+    ['Admin/Frame/notices', () => import('../controller/Admin/Frame/notices.js')],
+    ['Admin/Frame/msg', () => import('../controller/Admin/Frame/msg.js')],
+    ['Admin/Frame/swieprs', () => import('../controller/Admin/Frame/swieprs.js')],
+    ['Admin/Frame/emailTemplate', () => import('../controller/Admin/Frame/emailTemplate.js')],
+    ['Admin/Frame/navigation', () => import('../controller/Admin/Frame/navigation.js')],
+    ['Admin/Frame/activity', () => import('../controller/Admin/Frame/activity.js')],
+    ['Admin/Frame/Pay/payMethod', () => import('../controller/Admin/Frame/Pay/payMethod.js')],
+    ['Admin/Frame/Pay/payConfig', () => import('../controller/Admin/Frame/Pay/payConfig.js')],
+    ['Admin/Frame/Pay/payOrder', () => import('../controller/Admin/Frame/Pay/payOrder.js')],
+    ['Admin/Frame/Statistics/index', () => import('../controller/Admin/Frame/Statistics/index.js')],
+    ['Admin/category', () => import('../controller/Admin/category.js')],
+    ['Admin/medal', () => import('../controller/Admin/medal.js')],
+    ['Admin/threads', () => import('../controller/Admin/threads.js')],
+    ['Admin/market', () => import('../controller/Admin/market.js')],
+]);
+
+// 已加载模块的 Promise 缓存：并发首个请求只会触发一次模块初始化
+const loaded = new Map();
+
+export function loadController(path) {
+    let promise = loaded.get(path);
+    if (promise) return promise;
+    const loader = loaders.get(path);
+    if (!loader) return Promise.reject(new Error(`控制器未注册: ${path}`));
+    promise = loader().catch((error) => {
+        // 加载失败不缓存，避免一次瞬时错误导致该控制器永久不可用
+        loaded.delete(path);
+        throw error;
+    });
+    loaded.set(path, promise);
+    return promise;
+}
+
+// ---------- 中间件 ----------
 export const middlewares = new Map([
     ['NoMestUTokenVar', NoMestUTokenVar],
     ['UTokenVar', UTokenVar],

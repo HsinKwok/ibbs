@@ -3,7 +3,7 @@
 import './shim.js';
 import './global.js';
 import { initDb, initRedisGlobals } from './app/imp/main.js';
-import { controllers, middlewares } from './app/router/registry.js';
+import { loadController, middlewares } from './app/router/registry.js';
 import registerRoutes from './app/router/index.js';
 
 // ---------- 路由收集（复用 app/router/index.js 中的路由定义） ----------
@@ -17,16 +17,14 @@ function resolveMiddleware(name) {
 
 function addRoute(method, basePath, subPath, groupMiddlewares, controllerStr) {
     const [controllerPath, methodName] = controllerStr.split('@');
-    const controller = controllers.get(controllerPath);
-    if (!controller) throw new Error(`控制器未注册: ${controllerPath}`);
-    const handler = controller[methodName];
-    if (!handler) throw new Error(`控制器方法不存在: ${controllerStr}`);
 
+    // 控制器模块此刻不加载，仅登记路径与方法名，首次命中该路由时再初始化
     routes.push({
         method,
         path: basePath + subPath,
         middlewares: groupMiddlewares.map(resolveMiddleware),
-        handler,
+        controllerPath,
+        methodName,
     });
 }
 
@@ -53,11 +51,15 @@ const router = {
 
 await registerRoutes(router);
 
-// 建立 method+path 索引，避免每个请求线性遍历全部路由
+// 建立 method → path 两级索引，避免每个请求拼接字符串 key 与线性遍历全部路由
 const routeMap = new Map();
 for (const r of routes) {
-    const key = `${r.method} ${r.path}`;
-    if (!routeMap.has(key)) routeMap.set(key, r);
+    let byPath = routeMap.get(r.method);
+    if (!byPath) {
+        byPath = new Map();
+        routeMap.set(r.method, byPath);
+    }
+    if (!byPath.has(r.path)) byPath.set(r.path, r);
 }
 
 // ---------- 请求/响应适配 ----------
@@ -95,10 +97,29 @@ class Reply {
     }
 }
 
-async function buildRequest(request) {
-    const url = new URL(request.url);
+/* 业务实际读取的请求头白名单：逐个 get 比 entries() 全量遍历更省
+   （浏览器请求头常达数十个，业务只用其中少数几个）。
+   Token 头名直接取自配置，避免硬编码与配置不一致。 */
+const PREFETCH_HEADER_KEYS = [
+    'content-type', 'content-length', 'cf-connecting-ip',
+    'wechatpay-timestamp', 'wechatpay-nonce', 'wechatpay-signature', 'wechatpay-serial',
+    global.CONFIG.userToken.HeadersKey, global.CONFIG.adminToken.HeadersKey
+];
+
+/* 构造请求头视图：业务只读白名单内的头，全部预取进普通对象。
+   原先用 Proxy 兜底任意键，每次属性读取都要进陷阱函数（固定 CPU 开销），
+   且请求头名称是静态可枚举的，直接返回普通对象即可。 */
+function buildHeaderView(request) {
     const headers = {};
-    for (const [k, v] of request.headers.entries()) headers[k.toLowerCase()] = v;
+    for (const key of PREFETCH_HEADER_KEYS) {
+        const value = request.headers.get(key);
+        if (value !== null) headers[key] = value;
+    }
+    return headers;
+}
+
+async function buildRequest(request, url, ctx) {
+    const headers = buildHeaderView(request);
 
     const contentType = headers['content-type'] || '';
     let body = {};
@@ -114,7 +135,7 @@ async function buildRequest(request) {
            便于上传接口先按 Content-Length 拒绝超大请求，避免无谓地整块缓冲进内存。 */
     }
 
-    return {
+    const req = {
         raw: request,
         method: request.method.toUpperCase(),
         url: url.pathname,
@@ -122,9 +143,10 @@ async function buildRequest(request) {
         headers,
         body,
         rawBody,
-        query: Object.fromEntries(url.searchParams.entries()),
         params: {},
         Ware: null,
+        /* Workers ctx：控制器用它做 waitUntil（如阅读数自增、勋章结算等非关键路径写） */
+        ctx,
         // 读取 multipart 中的文件（兼容 Fastify 的 request.file()）
         async file() {
             /* 真正延迟解析：仅在首次调用 file() 时才读取整个 multipart body，
@@ -153,6 +175,18 @@ async function buildRequest(request) {
             };
         },
     };
+
+    /* query 惰性解析：业务接口绝大多数为 POST JSON，不读 query，
+       这里改成首次访问时才构造对象，避免每个请求都做一次 entries() 遍历 */
+    let queryCache;
+    Object.defineProperty(req, 'query', {
+        enumerable: true,
+        get() {
+            return queryCache ??= Object.fromEntries(url.searchParams.entries());
+        },
+    });
+
+    return req;
 }
 
 /* 默认放行的本地开发来源（生产环境请通过 Worker 环境变量 CORS_ORIGINS 配置前端域名，逗号分隔） */
@@ -170,12 +204,12 @@ function isOriginAllowed(origin) {
     return DEV_ORIGINS.includes(origin);
 }
 
-function withCors(response, request) {
-    const origin = request.headers.get('origin');
-    /* 无 Origin（服务端/同源请求）不需要任何 CORS 头，直接返回原响应，
-       省掉每次 new Headers() + new Response() 的克隆开销 */
+function withCors(response, origin) {
+    /* 无 Origin（服务端/同源请求）不需要任何 CORS 头，直接返回原响应 */
     if (!origin) return response;
-    const headers = new Headers(response.headers);
+    /* 这里的响应均由 Worker 自行构造（Response.json / new Response），headers 可写，
+       直接原地修改即可，无需 new Headers() + new Response() 克隆（会多包一层流） */
+    const headers = response.headers;
     headers.set('Vary', 'Origin');
     /* 仅回显白名单内的来源，避免任意站点携带凭证读取响应 */
     if (isOriginAllowed(origin)) {
@@ -184,7 +218,7 @@ function withCors(response, request) {
     }
     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     headers.set('Access-Control-Allow-Headers', 'usertoken,admintoken,Content-Type');
-    return new Response(response.body, { status: response.status, headers });
+    return response;
 }
 
 // ---------- 懒初始化（首个请求时注入 env.DB） ----------
@@ -224,13 +258,33 @@ async function ensureInit(env) {
     return initPromise;
 }
 
-// 从 R2 提供上传文件
-async function serveUpload(path, request) {
+// 从 R2 提供上传文件（带 Cache API 边缘缓存：上传内容不可变，文件名即版本）
+async function serveUpload(request, path, url, origin, ctx) {
     const filename = path.replace('/public/upload/', '');
-    if (!filename) return withCors(new Response('Not Found', { status: 404 }), request);
+    if (!filename) return withCors(new Response('Not Found', { status: 404 }), origin);
+
+    /* 仅 GET 走缓存；命中时省掉一次 R2 读 */
+    const cache = request.method === 'GET' ? caches.default : null;
+    const cacheKey = cache ? new Request(`${url.origin}${path}`, { method: 'GET' }) : null;
+
+    if (cache) {
+        /* 缓存读失败不影响主流程，直接回源 R2 */
+        try {
+            const hit = await cache.match(cacheKey);
+            if (hit) {
+                /* cache.match 返回的 Response headers 为 immutable，需重建后再追加 CORS 头 */
+                return withCors(new Response(hit.body, {
+                    status: hit.status,
+                    headers: new Headers(hit.headers)
+                }), origin);
+            }
+        } catch (error) {
+            console.error('读取上传文件缓存失败:', error);
+        }
+    }
 
     const object = await global.R2.get(`upload/${filename}`);
-    if (!object) return withCors(new Response('Not Found', { status: 404 }), request);
+    if (!object) return withCors(new Response('Not Found', { status: 404 }), origin);
 
     const headers = new Headers();
     object.writeHttpMetadata(headers);
@@ -239,58 +293,71 @@ async function serveUpload(path, request) {
     // 防止浏览器嗅探类型导致上传文件被当作 HTML 执行
     headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Content-Disposition', `inline; filename="${filename.replace(/["\\\r\n]/g, '')}"`);
-    return withCors(new Response(object.body, { headers }), request);
+    const response = new Response(object.body, { headers });
+
+    /* 缓存「未加 CORS 头」的副本：不同 Origin 各自回显，避免跨源串味 */
+    if (cache) ctx.waitUntil(cache.put(cacheKey, response.clone()).catch(() => {}));
+    return withCors(response, origin);
 }
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) {
+        /* 只读取一次 Origin，后续 CORS 处理直接复用字符串 */
+        const origin = request.headers.get('origin');
         try {
             await ensureInit(env);
         } catch (error) {
             console.error('初始化失败:', error);
-            return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), request);
+            return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), origin);
         }
 
         // CORS 预检（必须在 ensureInit 之后，确保冷启动时 global.CORS_ORIGINS 已注入）
         if (request.method.toUpperCase() === 'OPTIONS') {
-            return withCors(new Response(null, { status: 204 }), request);
+            return withCors(new Response(null, { status: 204 }), origin);
         }
 
         const method = request.method.toUpperCase();
-        const path = new URL(request.url).pathname;
+        /* URL 只解析一次，同时供路由匹配与 buildRequest 使用 */
+        const url = new URL(request.url);
+        const path = url.pathname;
 
         // 上传文件走 R2（读取 R2 可能失败，需兜底为统一错误响应，避免异常外泄）
         if (path.startsWith('/public/upload/')) {
             try {
-                return await serveUpload(path, request);
+                return await serveUpload(request, path, url, origin, ctx);
             } catch (error) {
                 console.error('读取上传文件失败:', error);
-                return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), request);
+                return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), origin);
             }
         }
 
-        const route = routeMap.get(`${method} ${path}`);
+        const byPath = routeMap.get(method);
+        const route = byPath && byPath.get(path);
 
         if (!route) {
-            return withCors(Response.json({ code: 400, msg: '访问路径错误', data: {}, total: 0 }, { status: 404 }), request);
+            return withCors(Response.json({ code: 400, msg: '访问路径错误', data: {}, total: 0 }, { status: 404 }), origin);
         }
 
         const reply = new Reply();
 
         try {
-            const req = await buildRequest(request);
+            const req = await buildRequest(request, url, ctx);
             for (const mw of route.middlewares) {
                 await mw(req, reply);
-                if (reply.sent) return withCors(reply.response, request);
+                if (reply.sent) return withCors(reply.response, origin);
             }
 
-            await route.handler(req, reply);
+            // 中间件通过后再加载控制器模块：被鉴权拦下的请求不触发模块初始化
+            const controller = await loadController(route.controllerPath);
+            const handler = controller.default[route.methodName];
+            if (!handler) throw new Error(`控制器方法不存在: ${route.controllerPath}@${route.methodName}`);
+            await handler(req, reply);
 
-            if (reply.sent) return withCors(reply.response, request);
-            return withCors(Response.json({ code: 500, msg: '服务器未返回响应', data: {}, total: 0 }), request);
+            if (reply.sent) return withCors(reply.response, origin);
+            return withCors(Response.json({ code: 500, msg: '服务器未返回响应', data: {}, total: 0 }), origin);
         } catch (error) {
             console.error('请求处理错误:', error);
-            return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), request);
+            return withCors(Response.json({ code: 500, msg: '服务器内部错误', data: {}, total: 0 }), origin);
         }
     },
 };

@@ -68,6 +68,17 @@ function normalizeThreadFields(source) {
     return { data };
 }
 
+/* 勋章结算属于非关键路径（失败不应影响发帖/评论结果）：有 ctx 时用 waitUntil 移到响应之后执行，
+   无 ctx（本地/测试）时同步等待，保证行为一致 */
+async function scheduleAssignMedal(request, uid) {
+    const task = AssignMedal.AssignMedal(uid).catch((error) => console.error('勋章结算失败:', error));
+    if (request.ctx && typeof request.ctx.waitUntil === 'function') {
+        request.ctx.waitUntil(task);
+        return;
+    }
+    await task;
+}
+
 export default {
     /*  */
     AddThreads: (request, reply) => global.Fun(reply, async () => {
@@ -105,6 +116,18 @@ export default {
             return global.sendMsg(reply, 201, ext.error);
         }
 
+        /* 写入与去重共用同一份哈希：写库时落 n_hash，去重时只比哈希，避免重复 SHA-256。
+           哈希统一按「提交时的原始正文」计算（与编辑路径口径一致） */
+        const contentHash = await global.Tools.hashContent(content);
+
+        /* 内容去重与信任等级互不依赖，先并行发起，与随后的人机验证重叠等待；
+           提前挂一个空 catch 消费异常，避免后续提前 return 时留下未处理的 rejection
+           （后续真正 await 时仍会拿到原始错误，错误语义不变） */
+        const duplicatedPromise = global.Tools.isDuplicateContent(Ware.id, content, 'thread', contentHash);
+        const trustPromise = global.Tools.getTrustLevel(Ware.id);
+        duplicatedPromise.catch(() => {});
+        trustPromise.catch(() => {});
+
         /* 人机验证：后台管理员复用同一接口但没有验证码组件，跳过校验；
            未配置 HCAPTCHA_SECRET 时 verifyHCaptcha 直接放行（等同该防护未启用） */
         if (!(await global.Tools.isAdminRequest(request))) {
@@ -115,26 +138,29 @@ export default {
         }
 
         /* 内容去重：同一用户 10 分钟内重复发布相同正文视为灌水 */
-        if (await global.Tools.isDuplicateContent(Ware.id, content, 'thread')) {
+        if (await duplicatedPromise) {
             return global.sendMsg(reply, 201, '请勿重复发布相同内容');
         }
 
         /* 频控：新用户使用更严格阈值并额外加冷却；叠加 IP 维度兜底，防止换号绕过用户级限流。
            限流走 Workers 原生 binding（未绑定时自动降级 KV），不消耗 KV 写额度。 */
-        const isNewUser = (await global.Tools.getTrustLevel(Ware.id)) === 'new';
+        const isNewUser = (await trustPromise) === 'new';
         const clientIp = global.Tools.getClientIp(request);
         const userRateKey = `thread:add:${Ware.id}`;
         const ipRateKey = `thread:add:ip:${clientIp}`;
         if (isNewUser && !(await global.Tools.acquireCooldown(`thread:add:cooldown:${Ware.id}`, POST_NEW_COOLDOWN))) {
             return global.sendMsg(reply, 201, `新账号发帖需间隔 ${POST_NEW_COOLDOWN} 秒，请稍后再试`);
         }
-        const userAllowed = await global.Tools.checkRateLimit(
-            isNewUser ? 'postUserNew' : 'postUser',
-            userRateKey,
-            isNewUser ? POST_RATE_LIMIT_NEW : POST_RATE_LIMIT,
-            RATE_TTL
-        );
-        const ipAllowed = await global.Tools.checkRateLimit('postIp', ipRateKey, POST_IP_RATE_LIMIT, RATE_TTL);
+        /* 用户级与 IP 级限流互不依赖，并行执行 */
+        const [userAllowed, ipAllowed] = await Promise.all([
+            global.Tools.checkRateLimit(
+                isNewUser ? 'postUserNew' : 'postUser',
+                userRateKey,
+                isNewUser ? POST_RATE_LIMIT_NEW : POST_RATE_LIMIT,
+                RATE_TTL
+            ),
+            global.Tools.checkRateLimit('postIp', ipRateKey, POST_IP_RATE_LIMIT, RATE_TTL)
+        ]);
         if (!userAllowed || !ipAllowed) {
             return global.sendMsg(reply, 201, '发帖过于频繁，请稍后再试');
         }
@@ -155,13 +181,18 @@ export default {
             n_havevideo: ext.data.n_havevideo ?? 2
         }
 
+        /* n_hash 为后加列：旧库未迁移时跳过写入，自动退回“每次即时计算哈希”的旧去重逻辑 */
+        if (contentHash && await global.Tools.hasColumn('n_threads', 'n_hash')) {
+            Form.n_hash = contentHash;
+        }
+
         const Threads = await global.db.insert('n_threads', Form)
 
         /*  */
 
         /* 写入分类以及话题（并累加分类热度） */
         await global.Tools.insertThreadCategories(Threads, pre.n_category, pre.n_topic, true)
-        await AssignMedal.AssignMedal(Ware.id)
+        await scheduleAssignMedal(request, Ware.id)
         global.sendMsg(reply, 200, '操作成功');
     }),
     /* 编辑贴贴 */
@@ -169,8 +200,8 @@ export default {
         const Ware = request.Ware;
         const pre = request.body;
 
-        /* 获取帖子详情 */
-        const Threads = await global.db.query('SELECT * FROM n_threads WHERE id = ?', [pre.id]);
+        /* 获取帖子归属：仅需 n_uid，避免 SELECT * 读取正文等大字段 */
+        const Threads = await global.db.query('SELECT n_uid FROM n_threads WHERE id = ?', [pre.id]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '帖子不存在');
         }
@@ -189,7 +220,12 @@ export default {
             return global.sendMsg(reply, 201, `内容长度不能超过${CONTENT_MAX_LEN}字符`);
         }
 
-        if (source.n_html !== undefined) source.n_html = global.Sanitize(source.n_html);
+        /* 正文变更时按原始输入重算哈希（口径与发帖一致），保证编辑后去重仍生效 */
+        let editedHash;
+        if (source.n_html !== undefined) {
+            editedHash = await global.Tools.hashContent(source.n_html);
+            source.n_html = global.Sanitize(source.n_html);
+        }
         if (source.n_name !== undefined) source.n_name = global.Sanitize(source.n_name);
         if (source.n_profile !== undefined) source.n_profile = global.Sanitize(source.n_profile);
         if (source.n_price !== undefined) {
@@ -216,6 +252,10 @@ export default {
             'n_resources', 'n_haveimage', 'n_havevideo'
         ]);
         if (Object.keys(Form).length) {
+            /* n_hash 为后加列：旧库未迁移时跳过 */
+            if (editedHash && await global.Tools.hasColumn('n_threads', 'n_hash')) {
+                Form.n_hash = editedHash;
+            }
             await global.db.update('n_threads', Form, 'id = ?', [pre.id])
         }
 
@@ -252,8 +292,8 @@ export default {
     DelThreads: (request, reply) => global.Fun(reply, async () => {
         const Ware = request.Ware;
         const pre = request.body;
-        /* 获取帖子信息 */
-        const Threads = await global.db.query('SELECT * FROM n_threads WHERE id = ?', [pre.id]);
+        /* 获取帖子归属：仅需 n_uid */
+        const Threads = await global.db.query('SELECT n_uid FROM n_threads WHERE id = ?', [pre.id]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '帖子不存在');
         }
@@ -293,8 +333,8 @@ export default {
     LikeThreads: (request, reply) => global.Fun(reply, async () => {
         const Ware = request.Ware;
         const pre = request.body;
-        /* 获取帖子信息 */
-        const Threads = await global.db.query('SELECT * FROM n_threads WHERE id = ?', [pre.id]);
+        /* 获取帖子归属：仅需 n_uid，用于点赞后给作者发勋章 */
+        const Threads = await global.db.query('SELECT n_uid FROM n_threads WHERE id = ?', [pre.id]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '帖子不存在');
         }
@@ -317,7 +357,7 @@ export default {
         if (meta.changes) {
             /* 更新帖子点赞数 */
             await global.db.run('UPDATE n_threads SET n_starts = n_starts + 1 WHERE id = ?', [pre.id]);
-            await AssignMedal.AssignMedal(Threads[0].n_uid)
+            await scheduleAssignMedal(request, Threads[0].n_uid)
         }
 
         global.sendMsg(reply, 200, '点赞成功');
@@ -332,8 +372,8 @@ export default {
             return global.sendMsg(reply, 201, '您已被禁言，暂时无法评论');
         }
 
-        /* 获取帖子信息 */
-        const Threads = await global.db.query('SELECT * FROM n_threads WHERE id = ?', [pre.id]);
+        /* 帖子存在性校验：仅取主键 */
+        const Threads = await global.db.query('SELECT id FROM n_threads WHERE id = ?', [pre.id]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '帖子不存在');
         }
@@ -358,8 +398,9 @@ export default {
             }
         }
 
-        /* 内容去重：同一用户 10 分钟内重复发表相同评论视为灌水 */
-        if (await global.Tools.isDuplicateContent(Ware.id, pre.n_html, 'comment')) {
+        /* 内容去重：同一用户 10 分钟内重复发表相同评论视为灌水（哈希与写库共用一份） */
+        const contentHash = await global.Tools.hashContent(pre.n_html);
+        if (await global.Tools.isDuplicateContent(Ware.id, pre.n_html, 'comment', contentHash)) {
             return global.sendMsg(reply, 201, '请勿重复发表相同评论');
         }
 
@@ -385,6 +426,10 @@ export default {
             n_cid: pre.n_cid ?? 0,
             n_time: new Date()
         }
+        /* n_hash 为后加列：旧库未迁移时跳过写入 */
+        if (contentHash && await global.Tools.hasColumn('n_comment', 'n_hash')) {
+            from.n_hash = contentHash;
+        }
         /* 新增评论、累加分类热度、累加评论数合并为一次 batch，保证原子性并收敛往返 */
         const cols = Object.keys(from);
         await global.db.batch([
@@ -401,8 +446,7 @@ export default {
                 params: [new Date(), pre.id]
             }
         ]);
-        /* 先完成勋章结算再响应，避免后续异常使已发送的成功响应被覆盖为 500 */
-        await AssignMedal.AssignMedal(Ware.id)
+        await scheduleAssignMedal(request, Ware.id)
         global.sendMsg(reply, 200, '评论成功');
 
     }),
@@ -441,8 +485,8 @@ export default {
     ReportThreads: (request, reply) => global.Fun(reply, async () => {
         const Ware = request.Ware;
         const pre = request.body;
-        /* 获取帖子信息 */
-        const Threads = await global.db.query('SELECT * FROM n_threads WHERE id = ?', [pre.n_tid]);
+        /* 帖子存在性校验：仅取主键 */
+        const Threads = await global.db.query('SELECT id FROM n_threads WHERE id = ?', [pre.n_tid]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '帖子不存在');
         }

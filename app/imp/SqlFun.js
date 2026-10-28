@@ -11,6 +11,12 @@ class Mysql {
     /* 表字段名缓存：表结构在运行期不变，避免每次分页都执行 PRAGMA table_info */
     static _columnsCache = new Map();
 
+    /* 拼接后的 SELECT 字段串缓存（键含 exclude 组合），省掉每次分页的 filter/map/join */
+    static _fieldsCache = new Map();
+
+    /* 内部字段：任何查询都不对外返回（n_hash 为内容去重哈希，泄漏会暴露发布内容指纹） */
+    static _hiddenFields = new Set(['n_hash']);
+
     /**
      * @param {D1Database} binding Cloudflare D1 绑定（env.DB）
      */
@@ -72,6 +78,19 @@ class Mysql {
         const prepared = statements.map(({ sql, params = [] }) => this._stmt(sql, params));
         const results = await this.binding.batch(prepared);
         return results.map(r => r?.meta ?? {});
+    }
+
+    /**
+     * 只读批量查询：D1 batch 一次往返执行多条 SELECT，按顺序返回各自的结果集。
+     * 与 batch() 的区别是保留查询结果（batch 只返回 meta，用于写入场景）。
+     * @param {{sql: string, params?: any[]}[]} statements
+     * @returns {Promise<any[][]>}
+     */
+    async queryBatch(statements = []) {
+        if (!statements.length) return [];
+        const prepared = statements.map(({ sql, params = [] }) => this._stmt(sql, params));
+        const results = await this.binding.batch(prepared);
+        return results.map(r => r?.results ?? []);
     }
 
     async insert(table, data) {
@@ -159,31 +178,52 @@ class Mysql {
         const dataSql = `SELECT ${fields} FROM \`${safeTable}\` WHERE 1=1 ${conditionSql} ORDER BY ${orderClause} LIMIT ${safeSize} OFFSET ${offset}`;
         const countSql = `SELECT COUNT(*) AS total FROM \`${safeTable}\` WHERE 1=1 ${conditionSql}`;
 
-        // 数据查询与总数查询相互独立，并行执行可减少一次 D1 往返延迟
-        const [data, total] = await Promise.all([
-            this.query(dataSql, [...conditionParams]),
-            this.query(countSql, conditionParams)
-        ]);
+        let data;
+        let total;
+        if (safePage === 1) {
+            /* 首页最常见：数据与总数并行查询，避免多一次串行往返 */
+            [data, total] = await Promise.all([
+                this.query(dataSql, conditionParams),
+                this.query(countSql, conditionParams)
+            ]);
+            total = total[0].total || 0;
+        } else {
+            /* 非首页先取数据：本页未取满说明已是末页，总数可直接由 offset + 行数得出，
+               省掉一次 COUNT 全表统计；取满或整页为空（页码越界，无法反推总数）时补查总数 */
+            data = await this.query(dataSql, conditionParams);
+            if (data.length > 0 && data.length < safeSize) {
+                total = offset + data.length;
+            } else {
+                const countRows = await this.query(countSql, conditionParams);
+                total = countRows[0].total || 0;
+            }
+        }
 
-        return {
-            data,
-            total: total[0].total || 0
-        };
+        return { data, total };
     }
 
     // 获取表字段（SQLite 使用 PRAGMA table_info 替代 SHOW COLUMNS）
     async selectFields(table, exclude = []) {
         const safeTable = Mysql.safeTable(table);
+        /* 拼接结果同样缓存：同一 table + exclude 组合在运行期固定 */
+        const cacheKey = exclude.length ? `${safeTable}|${exclude.join(',')}` : safeTable;
+        const cachedFields = Mysql._fieldsCache.get(cacheKey);
+        if (cachedFields) return cachedFields;
+
         let columns = Mysql._columnsCache.get(safeTable);
         if (!columns) {
             const info = await this.query(`PRAGMA table_info(\`${safeTable}\`)`);
             columns = info.map(col => col.name);
             Mysql._columnsCache.set(safeTable, columns);
         }
-        return columns
-            .filter(f => !exclude.includes(f))
+        const fields = columns
+            .filter(f => !exclude.includes(f) && !Mysql._hiddenFields.has(f))
             .map(f => `\`${f}\``)
             .join(', ');
+        /* 容量控制：exclude 组合来自内部调用，数量有限，超限直接清空重建 */
+        if (Mysql._fieldsCache.size >= 256) Mysql._fieldsCache.clear();
+        Mysql._fieldsCache.set(cacheKey, fields);
+        return fields;
     }
 }
 
