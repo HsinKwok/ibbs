@@ -2,7 +2,8 @@
     <div class="">
 
         <div class="UserInfo" @click="Users.id && !Users.isCancelled && navigateTo('/upinfo/' + Users.id)">
-            <div :style="{ backgroundImage: `url(${Users?.n_userback})` }" class="UserBack">
+            <!-- 无背景图时不绑定 style：直接拼 url(null) 会让浏览器发起 GET /null 的无效请求 -->
+            <div :style="Users?.n_userback ? { backgroundImage: `url(${Users.n_userback})` } : null" class="UserBack">
 
             </div>
             <UserAvatar class="avatar" :src="Users.n_avatar" :seed="Users.id || Users.n_nickname" alt="用户头像" />

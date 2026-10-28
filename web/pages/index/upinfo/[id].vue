@@ -3,9 +3,9 @@
         <div class="PageContent">
             <div class="UserInfo">
                 <div class="TopBox">
-                    <div class="TopBoxbACS" :style="{
-                        backgroundImage: `url(${Users.n_userback || '/default-banner.jpg'})`
-                    }">
+                    <div class="TopBoxbACS" :style="Users.n_userback ? {
+                        backgroundImage: `url(${Users.n_userback})`
+                    } : null">
                         <div class="BackgroundImage">
                         </div>
                     </div>
@@ -231,6 +231,8 @@ const goChat = () => {
                     .TopBoxbACS {
                         width: 100%;
                         height: 130px;
+                        /* 兜底背景：无 n_userback 时用渐变代替默认图，避免 404 请求 */
+                        background-image: linear-gradient(135deg, #dbeafe 0%, #eff6ff 60%, #ffffff 100%);
                         background-repeat: no-repeat;
                         background-size: 100%;
                         background-position: center;
@@ -469,6 +471,8 @@ const goChat = () => {
                     .TopBoxbACS {
                         width: 100%;
                         height: 130px;
+                        /* 兜底背景：无 n_userback 时用渐变代替默认图，避免 404 请求 */
+                        background-image: linear-gradient(135deg, #dbeafe 0%, #eff6ff 60%, #ffffff 100%);
                         background-repeat: no-repeat;
                         background-size: 100%;
                         background-position: center;

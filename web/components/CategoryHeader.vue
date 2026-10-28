@@ -1,8 +1,9 @@
 <template>
     <!-- 板块 / 话题 顶部信息卡（背景图 + 图标 + 名称 + 简介 + 统计标签） -->
-    <div class="MainContent" :style="{
-        backgroundImage: `url(${info.n_icon || '/default-banner.jpg'})`
-    }">
+    <!-- 无背景图时不绑定 style，回落到下方 CSS 渐变兜底，避免请求不存在的默认图 -->
+    <div class="MainContent" :style="info.n_icon ? {
+        backgroundImage: `url(${info.n_icon})`
+    } : null">
         <div class="ThreadInfo">
             <div class="TopBoxbACS"></div>
             <div class="TopBox">
@@ -44,6 +45,8 @@ defineProps({
 <style lang="scss" scoped>
 .MainContent {
     background-color: #fff;
+    /* 兜底背景：无 n_icon 时用渐变代替默认图，避免 404 请求 */
+    background-image: linear-gradient(135deg, #dbeafe 0%, #eff6ff 60%, #ffffff 100%);
     border-radius: 10px;
     margin-bottom: 12px;
     background-repeat: no-repeat;
