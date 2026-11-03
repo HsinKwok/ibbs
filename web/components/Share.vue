@@ -44,7 +44,12 @@
             <!-- 海报底部 -->
             <div class="poster-footer">
                 <div class="qr-code">
-                    <QRCodeVue :value="shareUrl" :size="80" level="L" />
+                    <!-- qrcode.vue 按需异步加载：服务端渲染时异步组件尚未就绪，只输出注释占位，
+                         客户端加载完成后渲染真实节点（Fragment），导致水合节点类型不匹配。
+                         二维码内容本来就取自浏览器地址，这里仅在客户端渲染。 -->
+                    <ClientOnly>
+                        <QRCodeVue :value="shareUrl" :size="80" level="L" />
+                    </ClientOnly>
                 </div>
                 <div class="footer-info">
                     <div class="app-name">{{SiteConfig.$state.Config.n_web_title}}</div>
@@ -69,7 +74,7 @@
 
 <script setup>
 import { ref, computed, defineAsyncComponent } from 'vue'
-import { resolveTimezone } from '@/utils/format'
+import { resolveTimezone, parseSiteTime } from '@/utils/format'
 /* 按需加载二维码组件，避免首屏打包第三方库 */
 const QRCodeVue = defineAsyncComponent(() => import('qrcode.vue'))
 const SiteConfig = useSiteConfig()
@@ -102,11 +107,13 @@ const images = computed(() => {
 
 const formatTime = (time) => {
     if (!time) return ''
-    return new Date(time).toLocaleDateString('zh-CN', {
+    /* 用 parseSiteTime 按站点时区解析无时区时间串：直接 new Date() 会随运行环境时区变化，
+       Worker(UTC) 与浏览器解析结果不同会让海报日期在服务端/客户端各差一天（水合失配） */
+    const date = parseSiteTime(time, SiteConfig.Config.n_timezone)
+    return date.toLocaleDateString('zh-CN', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
-        /* 按站点配置时区显示，避免服务端(UTC)与客户端时区不一致导致 hydration 失配 */
         timeZone: resolveTimezone(SiteConfig.Config.n_timezone)
     })
 }

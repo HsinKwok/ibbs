@@ -64,3 +64,22 @@ export const getSiteDate = (tz, date = new Date()) => {
   const p = getSiteDateParts(tz, date)
   return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
 }
+
+/* 后端返回的时间是「站点本地时间」字符串（如 2026-10-27 20:00:00，不带时区）。
+   直接 new Date(字符串) 会按运行环境的本地时区解析：Worker 是 UTC、浏览器是用户时区，
+   同一份数据会得到不同的时刻，SSR 与客户端渲染出的时间文本因此不一致（水合失配）。
+   这里把无时区的日期时间显式按站点时区解析成确定的时刻；带时区的格式仍交给 Date 解析。 */
+const NAIVE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/
+
+export const parseSiteTime = (value, tz) => {
+  if (value === null || value === undefined || value === '') return null
+  if (value instanceof Date) return value
+  if (typeof value === 'number') return new Date(value)
+  const str = String(value).trim()
+  const m = NAIVE_TIME_RE.exec(str)
+  if (!m) return new Date(str)
+  const asUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] || 0))
+  const zone = resolveTimezone(tz)
+  /* asUtc 是「站点墙上时间」当作 UTC 的毫秒数，减去该时刻的时区偏移即为真实时刻 */
+  return new Date(asUtc - getTimezoneOffsetMinutes(zone, new Date(asUtc)) * 60000)
+}

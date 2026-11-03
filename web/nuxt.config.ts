@@ -119,6 +119,9 @@ export default defineNuxtConfig({
         resolvers: [
           ArcoResolver({
             sideEffect: true,
+            /* 按需解析 <icon-xxx>：仅打包实际用到的图标。
+               若关闭，图标在服务端渲染为 <!---->、客户端渲染为原始标签，导致水合不一致且图标不显示 */
+            resolveIcons: true,
           }),
         ],
         dts: 'components.d.ts', // 生成组件类型声明文件
@@ -126,9 +129,16 @@ export default defineNuxtConfig({
     ],
     ssr: {
       noExternal: ['vue-router']
-    }
+    },
   },
   features: {
     inlineStyles: false
+  },
+  experimental: {
+    /* 关闭 payload 拆分：存在 swr 缓存路由时 Nuxt 默认会把页面 asyncData 拆到 _payload.json。
+       客户端首次访问要多请求一次 _payload.json，而该请求会再跑一次 SSR 渲染 + 再调一遍接口，
+       有副作用的字段（如阅读数 n_read）因此与 HTML 里的值不同，触发水合告警，同时白白多一次渲染开销。
+       改为内联进 HTML 后：首屏少一个请求、页面只渲染一次，SSR 数据与客户端 payload 完全一致。 */
+    payloadExtraction: false
   }
 })

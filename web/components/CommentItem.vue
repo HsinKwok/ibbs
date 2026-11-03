@@ -37,7 +37,7 @@
 <script setup>
 import { Message } from '@arco-design/web-vue';
 import { sanitizeHtml } from '@/utils/sanitize'
-import { resolveTimezone } from '@/utils/format'
+import { resolveTimezone, parseSiteTime } from '@/utils/format'
 const UserInfo = useUserInfo()
 const SiteConfig = useSiteConfig()
 const props = defineProps({
@@ -61,7 +61,9 @@ const now = useState('comment-now', () => Date.now())
 
 const formatTime = (timeStr) => {
     if (!timeStr) return ''
-    const date = new Date(timeStr)
+    /* 无时区时间串按站点时区解析，保证服务端(UTC)与浏览器算出同一时刻 */
+    const date = parseSiteTime(timeStr, SiteConfig.Config.n_timezone)
+    if (!date) return ''
     const diff = now.value - date
 
     const minute = 60 * 1000
