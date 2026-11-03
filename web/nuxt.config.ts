@@ -10,7 +10,10 @@ export default defineNuxtConfig({
     dirs: ['composables']
   },
   compatibilityDate: '2025-05-15',
-  compatibilityVersion: 4,
+  future: {
+    /* Nuxt 兼容版本开关在 future 下（顶层写 compatibilityVersion 不在类型定义中） */
+    compatibilityVersion: 4,
+  },
   devtools: false,
   devServer: {
     host: '0.0.0.0',

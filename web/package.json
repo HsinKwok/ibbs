@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@arco-design/web-vue": "^2.57.0",
+    "@types/node": "^24.19.2",
     "autoprefixer": "^10.4.21",
     "sass-embedded": "^1.89.2",
     "unplugin-auto-import": "^19.3.0",
