@@ -159,7 +159,7 @@ export default {
     /* 签到记录列表 */
     checkInList: (request, reply) => global.Fun(reply, async () => {
         const Ware = request.Ware;
-        const users = await global.db.query(`SELECT * FROM n_activity_checkin_log where n_uid = ? and n_time >= date('now','${global.Tools.sqlTimezoneModifier()}','-40 days') ORDER BY n_time DESC`, [Ware.id]);
+        const users = await global.db.query(`SELECT n_time, n_reward_type, n_reward_number FROM n_activity_checkin_log where n_uid = ? and n_time >= date('now','${global.Tools.sqlTimezoneModifier()}','-40 days') ORDER BY n_time DESC`, [Ware.id]);
         global.sendMsg(reply, 200, '获取成功', users);
     }),
 

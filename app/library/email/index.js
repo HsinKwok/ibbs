@@ -125,7 +125,7 @@ class EmailService {
 
             const { systemConfig } = await this.getLatestConfig();
 
-            const emailtep = await global.db.query('SELECT * FROM n_email_template where n_code = ?', [
+            const emailtep = await global.db.query('SELECT n_html FROM n_email_template where n_code = ?', [
                 options.template
             ]);
             if (emailtep.length === 0) {

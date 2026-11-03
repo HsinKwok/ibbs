@@ -26,7 +26,7 @@ class WechatPayService {
     async CreatePay(orderInfo, reply) {
         try {
             /* 获取用户信息 */
-            const userinfo = await global.db.query('SELECT * FROM n_users WHERE id = ?', [orderInfo.n_uid]);
+            const userinfo = await global.db.query('SELECT n_MiniProgramOpenid FROM n_users WHERE id = ?', [orderInfo.n_uid]);
             if (userinfo.length === 0) {
                 return global.sendMsg(reply, 201, '用户不存在');
             }

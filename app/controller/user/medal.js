@@ -32,7 +32,7 @@ function shouldSkipAssign(id) {
 async function getMedalDefs() {
     const now = Date.now();
     if (medalCache.data && medalCache.expire > now) return medalCache.data;
-    const data = await global.db.query(`SELECT * FROM n_medal`);
+    const data = await global.db.query(`SELECT id, n_name, n_type, n_threshold FROM n_medal`);
     medalCache = { data, expire: now + MEDAL_CACHE_TTL };
     return data;
 }

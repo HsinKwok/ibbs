@@ -7,6 +7,20 @@ const THREAD_SORT_FIELDS = new Set([
     'n_haveimage', 'n_havevideo', 'n_msglastTime'
 ]);
 
+/* FTS5 标题索引可用性：旧库未执行迁移时 n_threads_fts 不存在，
+   探测一次并缓存结果，缺失时回退 LIKE，避免搜索接口整体 500 */
+let ftsReady = null;
+const hasThreadFts = async () => {
+    if (ftsReady !== null) return ftsReady;
+    try {
+        await global.db.query('SELECT rowid FROM n_threads_fts LIMIT 1');
+        ftsReady = true;
+    } catch {
+        ftsReady = false;
+    }
+    return ftsReady;
+};
+
 export default {
     /*  */
     GetThreads: (request, reply) => global.Fun(reply, async () => {
@@ -105,6 +119,23 @@ export default {
                 return;
             }
 
+            /* 仅刷新个性化状态（登录后补拉 isLiked / IsBuy）：只回状态字段，不再重发整份帖子正文。
+               付费帖的正文与资源仅在「本站已解锁」（作者本人或已购）时才需要带回，其余情况匿名 SSR 已下发 needBuy */
+            if (pre.statusOnly) {
+                const status = {
+                    id: thread.id,
+                    isLiked: !!thread.isLiked,
+                    IsBuy: thread.IsBuy,
+                    n_starts: thread.n_starts
+                };
+                if (thread.n_price > 0 && thread.n_permission !== '1' && thread.n_html !== 'needBuy') {
+                    status.n_html = thread.n_html;
+                    status.n_resources = thread.n_resources;
+                }
+                global.sendMsg(reply, 200, '获取成功', status);
+                return;
+            }
+
             /* 写入阅读（先更新再响应，避免后续异常使已发送的成功响应被覆盖为 500）
                点赞后重新拉取等场景传 noread 跳过自增，避免虚增阅读量 */
             if (!pre.noread) {
@@ -144,8 +175,16 @@ export default {
             extraParams.push(Ware?.id || 0);
         }
         const SqlBuilder = new global.SqlBuilder();
+        /* 标题搜索：>=3 个字符走 FTS5 trigram 索引（子串语义与 LIKE 一致），
+           更短的关键词 trigram 无法命中，回退到原来的 LIKE 全表匹配 */
+        const keyword = typeof pre.search === 'string' ? pre.search.trim() : '';
+        if (keyword.length >= 3 && await hasThreadFts()) {
+            SqlBuilder.conditions.push('id IN (SELECT rowid FROM n_threads_fts WHERE n_name LIKE ?)');
+            SqlBuilder.params.push(`%${keyword}%`);
+        } else {
+            SqlBuilder.add('n_name', keyword, 'like');
+        }
         const sql = SqlBuilder
-            .add('n_name', pre.search, 'like')
             .add('n_uid', pre.uid)
             .add('n_haveimage', pre.image)
             .add('n_havevideo', pre.video)
@@ -154,7 +193,7 @@ export default {
         /* 排序字段走白名单，非法值回落 id，避免 ORDER BY 拼出不存在/内部列 */
         const sortField = THREAD_SORT_FIELDS.has(pre.sort) ? pre.sort : 'id';
 
-        /* 列表查询与装配封装为可缓存函数；只有「游客且无个性化筛选」时结果才对所有请求方一致，可安全缓存 */
+        /* 列表查询与装配封装为可缓存函数：装配结果只依赖帖子自身与其作者公开信息，不含任何个性化字段 */
         const buildList = async () => {
             /* 列表不返回 n_html（正文最长 5000 字符，前端列表卡片仅用 n_profile/n_resources），
                剔除后显著缩小 D1 传输与响应序列化体积 */
@@ -164,64 +203,62 @@ export default {
             if (res.data.length === 0) {
                 return { data: [], total: res.total };
             }
-        const tids = res.data.map(item => item.id);
+            const tids = res.data.map(item => item.id);
+            const uids = [...new Set(res.data.map(item => item.n_uid))];
 
-        /* 分类关系与购买记录互不依赖，一次并行发起；分类直接 JOIN 取回，
-           省掉「先查关系表、再查分类表」的一段串行往返 */
-        const [Relation, buys] = await Promise.all([
-            global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT DISTINCT t.n_tid, c.id, c.n_name, c.n_type, c.n_icon FROM n_tclist t JOIN n_class c ON c.id = t.n_cid WHERE t.n_tid IN (${c.map(() => '?').join(',')})`, c)),
-            wareId
-                /* 语句含 1（wareId）+ 分片 ids，分片预算取 99 使参数不超过 100 */
-                ? global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT n_tid FROM n_threads_buy WHERE n_uid = ? AND n_tid IN (${c.map(() => '?').join(',')})`, [wareId, ...c]), 99)
-                : Promise.resolve([])
-        ]);
+            /* 分类关系与作者信息互不依赖，并行查询：
+               分类：关系行已带分类字段，省掉「先查关系表、再查分类表」的串行往返；
+               作者：昵称/头像/勋章随列表一次带回，前端卡片不再对每个作者各发一次请求（N+1）。
+               勋章用 LEFT JOIN 一并取出，作者无勋章时 m_id 为 NULL。 */
+            const [Relation, Authors] = await Promise.all([
+                global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT DISTINCT t.n_tid, c.id, c.n_name, c.n_type, c.n_icon FROM n_tclist t JOIN n_class c ON c.id = t.n_cid WHERE t.n_tid IN (${c.map(() => '?').join(',')})`, c)),
+                global.Tools.queryInChunks(uids, (c) => global.db.query(`SELECT u.id, u.n_nickname, u.n_avatar, m.id AS m_id, m.n_name AS m_name, m.n_src AS m_src, m.n_type AS m_type FROM n_users u LEFT JOIN n_medal_log ml ON ml.n_uid = u.id LEFT JOIN n_medal m ON ml.n_mid = m.id WHERE u.id IN (${c.map(() => '?').join(',')})`, c))
+            ]);
 
-        if (Relation.length > 0) {
             /* 关系行已带分类字段，按帖子归并即可，无需二次查分类 */
             const threadCategoryMap = {};
             for (const row of Relation) {
                 const list = threadCategoryMap[row.n_tid] || (threadCategoryMap[row.n_tid] = []);
                 list.push({ id: row.id, n_name: row.n_name, n_type: row.n_type, n_icon: row.n_icon });
             }
+
+            /* 作者信息去重归并：一名作者可能有多枚勋章，LEFT JOIN 会返回多行 */
+            const userMap = {};
+            for (const row of Authors) {
+                const user = userMap[row.id] || (userMap[row.id] = { id: row.id, n_nickname: row.n_nickname, n_avatar: row.n_avatar, medals: [] });
+                if (row.m_id) user.medals.push({ id: row.m_id, n_name: row.m_name, n_src: row.m_src, n_type: row.m_type });
+            }
+
+            /* 列表对所有访客返回一致内容（前端才可安全 SSR 并复用缓存）：
+               判定只看帖子自身字段，不查购买记录、不依赖登录身份——付费帖的资源一律不在列表下发，
+               作者与已购用户进详情页查看。 */
             for (const thread of res.data) {
                 thread.category = threadCategoryMap[thread.id] || [];
-            }
-        }
-
-        /* 收费帖媒体资源：作者本人与已购用户可见，其他人隐藏（与详情分支保持一致） */
-        const boughtSet = new Set()
-        for (const row of buys) boughtSet.add(row.n_tid)
-
-        for (let a in res.data) {
-            try {
-                const isAuthor = wareId && res.data[a].n_uid == wareId
-                const isBuyer = boughtSet.has(res.data[a].id)
-                if (res.data[a].n_price > 0 && res.data[a].n_permission !== '1' && !isAuthor && !isBuyer) {
-                    res.data[a].n_resources = []
-                } else {
-                    /* n_resources 可能为 NULL（无资源帖），JSON.parse(null) 会得到 null 而非数组，需兜底为空数组 */
-                    const raw = res.data[a].n_resources
-                    res.data[a].n_resources = raw ? JSON.parse(raw) : []
+                /* 作者已注销时给占位信息，与详情页 GetUser 的 404 行为保持一致 */
+                thread.user = userMap[thread.n_uid] || { id: thread.n_uid, n_nickname: '该用户已被注销', n_avatar: '', isCancelled: true };
+                if (thread.n_price > 0 && thread.n_permission !== '1') {
+                    thread.n_resources = []
+                    continue
                 }
-            } catch (error) {
-                res.data[a].n_resources = []
+                try {
+                    /* n_resources 可能为 NULL（无资源帖），JSON.parse(null) 会得到 null 而非数组，需兜底为空数组 */
+                    thread.n_resources = thread.n_resources ? JSON.parse(thread.n_resources) : []
+                } catch (error) {
+                    thread.n_resources = []
+                }
             }
-        }
-
-
 
             return { data: res.data, total: res.total };
         };
 
-        /* 仅当请求方是纯游客（无登录身份，且未使用「我的/我赞/我购」等个性化筛选）时命中 KV 缓存，
-           TTL 60s，避免热门/列表读被反复打库；登录用户因付费资源可见性不同而不缓存 */
-        const isGuest = !(Ware && Ware.id) && !pre.ismy && !pre.isMyLike && !pre.isMyBuy;
-        if (isGuest && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
+        /* 列表内容已与登录身份无关（只按帖子自身字段组装），仅「我的/我赞/我购」这类按人筛选的结果不能共享 */
+        const canCache = !pre.ismy && !pre.isMyLike && !pre.isMyBuy;
+        if (canCache && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
             /* 用 JSON 序列化构造缓存键：字符串会被引号包裹，避免 join(':') 时
                用户可控参数中含冒号导致的键碰撞（如 search='a:b' 与 search='a',uid='b'） */
-            /* v2：缓存内容从「数据对象」改为「完整响应文本」，换前缀避免读到旧格式缓存 */
-            const cacheKey = 'threads:list:v2:' + JSON.stringify([
-                pre.search || '', pre.uid || '', pre.image ?? '', pre.video ?? '',
+            /* v4：列表新增作者信息（user 字段），换前缀避免读到缺少该字段的旧缓存 */
+            const cacheKey = 'threads:list:v4:' + JSON.stringify([
+                keyword, pre.uid || '', pre.image ?? '', pre.video ?? '',
                 pre.cid || '', pre.cidt || '', sortField, pre.sortType ?? 'desc',
                 pre.page || 1, pre.pagesize || 20
             ]);
@@ -284,10 +321,10 @@ export default {
             return { data: res.data, total: res.total };
         };
 
-        /* 仅纯游客（无登录身份、未使用「只看我的」）走缓存：评论不因登录态变化，
-           但 ismy 是个人化视图，不缓存。两级：isolate 内存 10s → KV 60s，缓存完整响应文本 */
-        const isGuest = !(Ware && Ware.id) && !pre.ismy;
-        if (isGuest && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
+        /* 评论结果不随登录身份变化（只按帖子/作者/分页组装），仅「只看我的」是按人视图、不缓存。
+           两级：isolate 内存 10s → KV 60s，缓存完整响应文本 */
+        const canCache = !pre.ismy;
+        if (canCache && global.RedisUtils && global.RedisUtils.getOrSetTextCache) {
             const cacheKey = 'comments:list:v1:' + JSON.stringify([
                 pre.id || '', pre.uid || '', pre.page || 1, pre.pagesize || 20
             ]);

@@ -123,7 +123,7 @@ class PayService {
         try {
 
             /* 查询订单 */
-            const order = await global.db.query('SELECT * FROM n_payorder where n_no = ?', [options.n_no]);
+            const order = await global.db.query('SELECT id, n_uid, n_type, n_balance, n_amount, n_path FROM n_payorder where n_no = ?', [options.n_no]);
             if (order.length === 0) {
                 return global.sendMsg(reply, 201, '订单不存在');
             }
@@ -139,7 +139,7 @@ class PayService {
             }
 
             /* 查询支付方式 */
-            const paymethod = await global.db.query('SELECT * FROM n_paymethod where n_code = ?', [options.n_paymethod]);
+            const paymethod = await global.db.query('SELECT n_code FROM n_paymethod where n_code = ?', [options.n_paymethod]);
             if (paymethod.length === 0) {
                 return global.sendMsg(reply, 201, '支付方式不存在');
             }
@@ -301,7 +301,7 @@ class PayService {
 
             options.out_trade_no = await getOrderNo(options)
             /* 查询订单 */
-            const order = await global.db.query('SELECT * FROM n_payorder where n_no = ?', [options.out_trade_no]);
+            const order = await global.db.query('SELECT id, n_no, n_uid, n_type, n_paycode, n_amount FROM n_payorder where n_no = ?', [options.out_trade_no]);
             if (order.length === 0) {
                 return notifyFail('订单不存在');
             }

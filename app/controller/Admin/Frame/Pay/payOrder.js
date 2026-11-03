@@ -7,16 +7,19 @@ export default {
 
         /* 如果有ID */
         if (pre.id) {
-            let order = await global.db.query('select * from n_payorder where id = ?', [pre.id])
+            /* 订单、明细、下单用户原本三次串行查询；明细/用户用子查询定位，合并为一次 D1 batch */
+            const [order, orderItem, user] = await global.db.queryBatch([
+                { sql: 'select * from n_payorder where id = ?', params: [pre.id] },
+                { sql: 'SELECT * FROM n_payorder_item where n_oid = ?', params: [pre.id] },
+                { sql: 'select n_nickname, n_username from n_users where id = (SELECT n_uid FROM n_payorder WHERE id = ?)', params: [pre.id] }
+            ]);
             if (order.length === 0) {
                 global.sendMsg(reply, 201, '订单不存在');
                 return;
             }
-            const orderItem = await global.db.query('SELECT * FROM n_payorder_item where n_oid = ?', [order[0].id]);
             order[0].n_item = orderItem;
 
             /* 获取用户信息 */
-            const user = await global.db.query('select * from n_users where id = ?', [order[0].n_uid])
             order[0].n_user_nickname = user.length > 0 ? user[0].n_nickname : ''
             order[0].n_user_username = user.length > 0 ? user[0].n_username : ''
             global.sendMsg(reply, 200, '获取成功', order[0]);

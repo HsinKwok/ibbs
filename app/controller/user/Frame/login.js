@@ -1,6 +1,6 @@
 /* 用户邀请逻辑 */
 const InviteFun = async (uid, inv) => {
-    const users = await global.db.query('SELECT * FROM n_users where n_encoding = ?', [inv]);
+    const users = await global.db.query('SELECT id FROM n_users where n_encoding = ?', [inv]);
     if (users.length > 0) {
         await global.db.insert('n_activity_useracquisition_log', {
             n_uid: uid,
@@ -216,7 +216,7 @@ export default {
             return;
         }
 
-        const users = await global.db.query('SELECT * FROM n_users where n_username = ?', [pre.username]);
+        const users = await global.db.query('SELECT id FROM n_users where n_username = ?', [pre.username]);
 
         if (users.length == 0) {
             global.sendMsg(reply, 201, '用户名不存在');

@@ -480,6 +480,60 @@ export function pickFields(source, fields) {
   return out;
 }
 
+/* 帖子标题/正文长度上限：用户端与管理端共用同一份，避免两端限制漂移 */
+export const TITLE_MAX_LEN = 100;
+export const CONTENT_MAX_LEN = 5000;
+
+/* 帖子权限：'1' 免费 / '2' 积分 / '3' 余额 */
+const PERMISSION_VALUES = ['1', '2', '3'];
+/* 资源数据（前端 JSON.stringify(resources) 得到的 JSON 数组字符串）长度上限 */
+const RESOURCES_MAX_LEN = 100000;
+
+/* 归一化并校验帖子的权限/资源/媒体标志位，仅处理显式传入的字段。
+   返回 { error } 表示校验失败，否则返回 { data }（仅含传入字段，已归一）。
+   用户端与管理端共用，避免管理员端绕过校验写入非法值 */
+export function normalizeThreadFields(source) {
+  const data = {};
+
+  if (source.n_permission !== undefined) {
+    const permission = String(source.n_permission);
+    if (!PERMISSION_VALUES.includes(permission)) {
+      return { error: '权限类型不合法' };
+    }
+    data.n_permission = permission;
+  }
+
+  if (source.n_resources !== undefined) {
+    const raw = source.n_resources;
+    if (raw === null || raw === '' || raw === 'null') {
+      data.n_resources = '[]';
+    } else {
+      if (typeof raw !== 'string' || raw.length > RESOURCES_MAX_LEN) {
+        return { error: '资源数据不合法' };
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        return { error: '资源数据不合法' };
+      }
+      if (!Array.isArray(parsed)) {
+        return { error: '资源数据不合法' };
+      }
+      data.n_resources = raw;
+    }
+  }
+
+  /* 媒体标志位：1 有 / 2 无（前端默认 2），统一归一为数字 */
+  for (const key of ['n_haveimage', 'n_havevideo']) {
+    if (source[key] !== undefined) {
+      data[key] = Number(source[key]) === 1 ? 1 : 2;
+    }
+  }
+
+  return { data };
+}
+
 /* 归一化帖子的分类/话题 JSON，返回 [[tid, cid, type], ...]；仅接受正整数分类 ID
    （避免用户提交任意字符串写入 n_cid） */
 function normalizeCategoryRows(tid, categoryJson, topicJson) {
@@ -534,6 +588,41 @@ export async function insertThreadCategories(tid, categoryJson, topicJson, addHo
   }
 
   await global.db.batch(statements);
+}
+
+/* 级联删除帖子（分类关联、评论、点赞、购买、举报）并在同一事务内对称回收分类热度。
+   热度口径：每帖对其所属每个分类贡献 1，其下每条评论再对帖子所属每个分类各贡献 1。
+   ids 支持单个或多个；返回实际处理的 id 列表（空数组表示入参非法） */
+export async function deleteThreadsCascade(rawIds) {
+  const ids = parseIds(rawIds);
+  if (!ids.length) return [];
+
+  const placeholders = ids.map(() => '?').join(', ');
+  /* 删除前按分类聚合帖子数与评论数，两个统计互不依赖，并行发起 */
+  const [hotRows, commentHotRows] = await Promise.all([
+    global.db.query(`SELECT n_cid, COUNT(DISTINCT n_tid) AS c FROM n_tclist WHERE n_tid IN (${placeholders}) GROUP BY n_cid`, ids),
+    global.db.query(`SELECT tc.n_cid, COUNT(c.id) AS cc FROM n_tclist tc JOIN n_comment c ON c.n_tid = tc.n_tid WHERE tc.n_tid IN (${placeholders}) GROUP BY tc.n_cid`, ids),
+  ]);
+
+  const statements = [
+    { sql: `DELETE FROM n_tclist WHERE n_tid IN (${placeholders})`, params: ids },
+    { sql: `DELETE FROM n_comment WHERE n_tid IN (${placeholders})`, params: ids },
+    { sql: `DELETE FROM n_threads_like WHERE n_tid IN (${placeholders})`, params: ids },
+    { sql: `DELETE FROM n_threads_buy WHERE n_tid IN (${placeholders})`, params: ids },
+    { sql: `DELETE FROM n_report WHERE n_tid IN (${placeholders})`, params: ids },
+    { sql: `DELETE FROM n_threads WHERE id IN (${placeholders})`, params: ids },
+  ];
+  /* 每帖及其评论对每个唯一分类各贡献热度，删除后按分类同步递减 */
+  const commentHotMap = new Map(commentHotRows.map((row) => [row.n_cid, row.cc]));
+  for (const row of hotRows) {
+    statements.push({
+      sql: 'UPDATE n_class SET n_hotnum = n_hotnum - ? WHERE id = ?',
+      params: [row.c + (commentHotMap.get(row.n_cid) || 0), row.n_cid],
+    });
+  }
+
+  await global.db.batch(statements);
+  return ids;
 }
 
 /* 读取客户端真实 IP：仅信任 Cloudflare 注入的 cf-connecting-ip。

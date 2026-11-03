@@ -249,7 +249,7 @@ export async function upPayNotify(info, reply) {
     try {
 
         /* 获取订单物品 */
-        const orderItem = await global.db.query('SELECT * FROM n_payorder_item where n_oid = ?', [info.id]);
+        const orderItem = await global.db.query('SELECT n_type, n_price, n_sid FROM n_payorder_item where n_oid = ?', [info.id]);
 
         /* 先做只读校验并收集全部写语句，最后用 D1 batch 在同一事务内原子执行：
            任一明细失败则整体回滚，避免「部分发放 + 平台重试 → 重复发放」。 */
@@ -277,7 +277,7 @@ export async function upPayNotify(info, reply) {
             /* 如果是购买会员 */
             if (item.n_type === '2') {
                 /* 查询会员等级信息 */
-                const memberLevel = await global.db.query('SELECT * FROM n_usergroup_price where id = ?', [item.n_sid]);
+                const memberLevel = await global.db.query('SELECT n_gid, n_day FROM n_usergroup_price where id = ?', [item.n_sid]);
                 if (memberLevel.length == 0) {
                     /* 数据缺失时必须抛错：订单已被占用为已支付，静默跳过会造成「钱货两空」且平台不重试 */
                     throw new Error('会员等级不存在：' + item.n_sid);
@@ -285,7 +285,7 @@ export async function upPayNotify(info, reply) {
 
                 /* 获取会员组 */
 
-                const memberGroup = await global.db.query('SELECT * FROM n_usergroup where id = ?', [memberLevel[0].n_gid]);
+                const memberGroup = await global.db.query('SELECT id FROM n_usergroup where id = ?', [memberLevel[0].n_gid]);
                 if (memberGroup.length == 0) {
                     throw new Error('会员组不存在：' + memberLevel[0].n_gid);
                 };

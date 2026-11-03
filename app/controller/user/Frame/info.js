@@ -1,35 +1,40 @@
 import AssignMedal from "../medal.js";
 
+/* 用户组属低频变更的公共数据，进程内缓存 300 秒；后台用户组写操作会按前缀失效 */
+const GROUP_CACHE_TTL = 300;
+
+const cachedGroup = (key, fetcher) => {
+    const cache = global.RedisUtils?.getOrSetMemoryCache;
+    return cache ? cache(key, GROUP_CACHE_TTL, fetcher) : fetcher();
+};
+
+/* 按 id 取用户组，不存在返回 null */
+const getGroupById = (id) => cachedGroup(`usergroup:item:${id}`, async () => {
+    const rows = await global.db.query('SELECT * FROM n_usergroup where id = ?', [id]);
+    return rows[0] || null;
+});
+
+/* 取默认用户组，不存在返回 null */
+const getDefaultGroup = () => cachedGroup('usergroup:default:v1', async () => {
+    const rows = await global.db.query('SELECT * FROM n_usergroup where n_deft = 1');
+    return rows[0] || null;
+});
+
 /* 对内 获取用户会员信息函数；user 为可选参数，调用方已查出用户行时复用以避免重复查询 */
 const getVipInfo = async (id, user) => {
-    let groupInfo = {};
-    const users = user ? [user] : await global.db.query('SELECT * FROM n_users where id = ?', [id]);
-
-    if (users.length === 0) {
-        const info = await global.db.query('SELECT * FROM n_usergroup where n_deft = 1');
-        if (info.length > 0) {
-            groupInfo = info[0];
-        }
-    } else {
-        if (users[0].n_group_id && users[0].n_group_id > 0) {
-            const info = await global.db.query('SELECT * FROM n_usergroup where id = ?', [users[0].n_group_id]);
-            if (info.length > 0) {
-                groupInfo = info[0];
-            } else {
-                const info = await global.db.query('SELECT * FROM n_usergroup where n_deft = 1');
-                if (info.length > 0) {
-                    groupInfo = info[0];
-                }
-            }
-        } else {
-            const info = await global.db.query('SELECT * FROM n_usergroup where n_deft = 1');
-            if (info.length > 0) {
-                groupInfo = info[0];
-            }
-        }
+    let groupId = user ? user.n_group_id : null;
+    if (!user) {
+        /* 只取判定所需的字段，避免整行读取 */
+        const rows = await global.db.query('SELECT n_group_id FROM n_users where id = ?', [id]);
+        groupId = rows.length ? rows[0].n_group_id : null;
     }
 
-    return groupInfo;
+    if (groupId && groupId > 0) {
+        const group = await getGroupById(groupId);
+        if (group) return { ...group };
+    }
+    const fallback = await getDefaultGroup();
+    return fallback ? { ...fallback } : {};
 }
 
 /* 用户可自行修改的字段白名单，防止越权修改积分/余额/权限等敏感字段 */
@@ -87,7 +92,7 @@ export default {
         const Ware = request.Ware;
         const pre = request.body;
 
-        const users = await global.db.query('SELECT * FROM n_users where id = ?', [Ware.id]);
+        const users = await global.db.query('SELECT id FROM n_users where id = ?', [Ware.id]);
 
         if (users.length === 0) {
             global.sendMsg(reply, 201, '用户不存在');
@@ -142,7 +147,7 @@ export default {
         const Ware = request.Ware;
         const pre = request.body;
 
-        const users = await global.db.query('SELECT * FROM n_users where id = ?', [Ware.id]);
+        const users = await global.db.query('SELECT n_group_id FROM n_users where id = ?', [Ware.id]);
         if (users.length === 0) {
             global.sendMsg(reply, 201, '用户不存在');
             return;
@@ -202,7 +207,7 @@ export default {
             return global.sendMsg(reply, 201, '不能关注自己');
         }
         /* 获取帖子信息 */
-        const Threads = await global.db.query('SELECT * FROM n_users WHERE id = ?', [pre.id]);
+        const Threads = await global.db.query('SELECT id FROM n_users WHERE id = ?', [pre.id]);
         if (!Threads || Threads.length === 0) {
             return global.sendMsg(reply, 404, '用户不存在');
         }

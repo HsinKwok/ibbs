@@ -1,4 +1,21 @@
 import PayService from '../../../library/pay/index.js'
+/* 支付方式属低频变更的公共数据，进程内缓存 300 秒；后台增删改后按前缀失效 */
+const PAYMETHOD_CACHE_TTL = 300;
+
+async function getPayMethodList(variant) {
+    const fetcher = () => {
+        let sql = 'SELECT * FROM n_paymethod where n_code != 5 order by n_index desc'
+        if (variant === '2') {
+            sql = 'SELECT * FROM n_paymethod where n_code != 4 and n_code != 5 order by n_index desc'
+        } else if (variant === '3') {
+            sql = 'SELECT * FROM n_paymethod where n_code = 5 order by n_index desc'
+        }
+        return global.db.query(sql)
+    }
+    const cache = global.RedisUtils?.getOrSetMemoryCache;
+    return cache ? cache(`paymethod:list:v1:${variant}`, PAYMETHOD_CACHE_TTL, fetcher) : fetcher();
+}
+
 export default {
     /* 创建订单 */
     CreateOrder: (request, reply) => global.Fun(reply, async () => {
@@ -23,7 +40,11 @@ export default {
 
 
         try {
-            const order = await global.db.query('SELECT * FROM n_payorder where n_no = ?', [pre.no]);
+            /* 订单与明细原本是两次串行往返；明细用子查询定位 n_oid，合并为一次 D1 batch */
+            const [order, orderItem] = await global.db.queryBatch([
+                { sql: 'SELECT * FROM n_payorder where n_no = ?', params: [pre.no] },
+                { sql: 'SELECT * FROM n_payorder_item where n_oid = (SELECT id FROM n_payorder where n_no = ?)', params: [pre.no] }
+            ]);
             if (order.length === 0) {
                 return global.sendMsg(reply, 201, '订单不存在');
             }
@@ -31,7 +52,6 @@ export default {
             if (order[0].n_uid != Ware.id) {
                 return global.sendMsg(reply, 403, '无权限');
             }
-            const orderItem = await global.db.query('SELECT * FROM n_payorder_item where n_oid = ?', [order[0].id]);
             order[0].n_item = orderItem;
 
             delete order[0].n_from;
@@ -70,7 +90,7 @@ export default {
             if (!Ware?.id) {
                 return global.sendMsg(reply, 401, '请先登录');
             }
-            const order = await global.db.query('SELECT * FROM n_payorder where n_no = ?', [pre.no]);
+            const order = await global.db.query('SELECT n_uid, n_balance FROM n_payorder where n_no = ?', [pre.no]);
             if(order.length === 0) {
                 return global.sendMsg(reply, 201, '订单不存在');
             }
@@ -78,14 +98,7 @@ export default {
             if (order[0].n_uid != Ware.id) {
                 return global.sendMsg(reply, 403, '无权限');
             }
-            let sql = 'SELECT * FROM n_paymethod where n_code != 5 order by n_index desc'
-            if (order[0].n_balance === '2') {
-                sql = 'SELECT * FROM n_paymethod where n_code != 4 and n_code != 5 order by n_index desc'
-            }
-             if (order[0].n_balance === '3') {
-                sql = 'SELECT * FROM n_paymethod where n_code = 5 order by n_index desc'
-            }
-            const paymethod = await global.db.query(sql);
+            const paymethod = await getPayMethodList(order[0].n_balance);
             global.sendMsg(reply, 200, '成功', paymethod);
         } catch (error) {
             console.log(error);

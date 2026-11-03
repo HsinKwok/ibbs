@@ -259,6 +259,8 @@ const USER_EDITABLE_FIELDS = ['n_avatar', 'n_userback', 'n_nickname', 'n_signatu
 const USERGROUP_FIELDS = ['n_name', 'n_icon', 'n_back', 'n_note', 'n_sort', 'n_deft', 'n_text_color', 'n_mini_icon', 'n_info_icon', 'n_back_image', 'n_withdrawal_fee', 'n_withdrawal_min', 'n_withdrawal_max', 'n_qps', 'n_discount', 'n_points_ratio'];
 /* 用户组价格可编辑字段白名单 */
 const USERGROUP_PRICE_FIELDS = ['n_gid', 'n_price', 'n_strikethroughprice', 'n_give', 'n_day', 'n_sort', 'n_points'];
+/* 用户组属低频变更的公共数据，前台按组 id / 默认组做进程内缓存；后台写操作后按前缀失效 */
+const clearUsergroupCache = () => global.RedisUtils?.clearMemoryCache?.('usergroup:');
 
 /* n_users：列表 / 编辑 / 删除（可选级联删除内容） */
 const usersCrud = createCrudController({
@@ -341,6 +343,9 @@ const usergroupCrud = createCrudController({
     searchField: 'n_name',
     /* 系统内置组（管理员组）置顶，其余按权重倒序 */
     sort: [['n_builtin', 'desc'], ['n_sort', 'desc']],
+    afterAdd: clearUsergroupCache,
+    afterEdit: clearUsergroupCache,
+    afterDelete: clearUsergroupCache,
     /* 系统内置组不可编辑（改名前端已隐藏入口，此处兜底防止改名/改默认标记） */
     beforeEdit: async (data, pre, reply) => {
         const builtin = await findBuiltinGroups(pre.id);
@@ -453,6 +458,7 @@ export default {
 
         /* 单条语句原子完成：目标行置 1、其余置 0，避免两步之间出现「无默认组」的中间态 */
         await global.db.run('UPDATE `n_usergroup` SET `n_deft` = CASE WHEN `id` = ? THEN 1 ELSE 0 END', [pre.id])
+        clearUsergroupCache();
         global.sendMsg(reply, 200, '设置成功');
     }),
 }

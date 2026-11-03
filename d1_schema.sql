@@ -806,6 +806,8 @@ CREATE INDEX IF NOT EXISTS `idx_comment_tid_id` ON `n_comment` (`n_tid`, `id`);
 CREATE INDEX IF NOT EXISTS `idx_comment_uid` ON `n_comment` (`n_uid`);
 -- 内容去重按「用户 + 时间窗」扫描，复合索引避免回表扫全用户评论
 CREATE INDEX IF NOT EXISTS `idx_comment_uid_time` ON `n_comment` (`n_uid`, `n_time`);
+-- 后台统计按时间区间 COUNT / 趋势按天聚合，缺少该索引时每次都全表扫描
+CREATE INDEX IF NOT EXISTS `idx_comment_time` ON `n_comment` (`n_time`);
 CREATE INDEX IF NOT EXISTS `idx_threads_like_uid_tid` ON `n_threads_like` (`n_uid`, `n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_threads_like_tid`     ON `n_threads_like` (`n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_threads_buy_uid_tid` ON `n_threads_buy` (`n_uid`, `n_tid`);
@@ -814,15 +816,23 @@ CREATE INDEX IF NOT EXISTS `idx_user_like_uid` ON `n_user_like` (`n_uid`);
 CREATE INDEX IF NOT EXISTS `idx_user_like_tid` ON `n_user_like` (`n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_report_tid` ON `n_report` (`n_tid`);
 CREATE INDEX IF NOT EXISTS `idx_report_uid` ON `n_report` (`n_uid`);
-CREATE INDEX IF NOT EXISTS `idx_msg_uid` ON `n_msg` (`n_uid`);
-CREATE INDEX IF NOT EXISTS `idx_user_msg_from` ON `n_user_msg` (`n_from`);
-CREATE INDEX IF NOT EXISTS `idx_user_msg_to`   ON `n_user_msg` (`n_to`);
+-- 消息列表按 n_uid 过滤 + id 倒序分页：复合索引同时覆盖单列查询与排序
+CREATE INDEX IF NOT EXISTS `idx_msg_uid_id` ON `n_msg` (`n_uid`, `id`);
+-- 会话消息按「双方 + 倒序分页」查询，两个方向各建一条复合索引
+-- （同时覆盖原单列 n_from / n_to 的查询，故不再单独建单列索引）
+CREATE INDEX IF NOT EXISTS `idx_user_msg_from_to_id` ON `n_user_msg` (`n_from`, `n_to`, `id`);
+CREATE INDEX IF NOT EXISTS `idx_user_msg_to_from_id` ON `n_user_msg` (`n_to`, `n_from`, `id`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_no`  ON `n_payorder` (`n_no`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_uid` ON `n_payorder` (`n_uid`);
 -- 后台统计按「类型 + 时间范围」聚合流水，避免全表扫描
 CREATE INDEX IF NOT EXISTS `idx_payorder_type_time` ON `n_payorder` (`n_type`, `n_paytime`);
 CREATE INDEX IF NOT EXISTS `idx_payorder_item_oid` ON `n_payorder_item` (`n_oid`);
-CREATE INDEX IF NOT EXISTS `idx_withdrawlog_uid` ON `n_withdrawlog` (`n_uid`);
+-- 提现记录按用户过滤 + id 倒序分页
+CREATE INDEX IF NOT EXISTS `idx_withdrawlog_uid_id` ON `n_withdrawlog` (`n_uid`, `id`);
+-- 账单列表按用户过滤 + id 倒序分页（原表无任何索引）
+CREATE INDEX IF NOT EXISTS `idx_user_bill_uid_id` ON `n_user_bill` (`n_uid`, `id`);
+-- 签到记录全部按「用户 + 日期区间」查询（原表无任何索引）
+CREATE INDEX IF NOT EXISTS `idx_checkin_uid_time` ON `n_activity_checkin_log` (`n_uid`, `n_time`);
 CREATE INDEX IF NOT EXISTS `idx_medal_log_uid` ON `n_medal_log` (`n_uid`);
 CREATE INDEX IF NOT EXISTS `idx_medal_log_mid` ON `n_medal_log` (`n_mid`);
 CREATE INDEX IF NOT EXISTS `idx_useracquisition_superior` ON `n_activity_useracquisition_log` (`n_superior`);
@@ -875,4 +885,47 @@ WHEN (NEW.`n_username` IS NOT OLD.`n_username` OR NEW.`n_nickname` IS NOT OLD.`n
 BEGIN
     SELECT RAISE(ABORT, 'user identifier already exists');
 END;
+
+-- =============================================================
+-- 帖子标题全文检索（FTS5）
+-- 用途：前台帖子搜索原为 `n_name LIKE '%关键词%'`，前后通配符无法使用普通索引，
+--       数据量增长后必然全表扫描。改用 FTS5 + trigram 分词器：
+--       trigram 按 3 字符切片建索引，「子串」语义与 LIKE 一致，中文无需分词。
+-- 说明：
+--   1. content='n_threads' 表示外部内容表，索引只存倒排、不复制正文；
+--   2. 用触发器维护索引，发帖/改标题/删帖无论走哪条代码路径都能同步；
+--   3. trigram 最小匹配长度为 3 个字符，不足 3 个字符的查询在代码层回退到 LIKE。
+-- =============================================================
+
+CREATE VIRTUAL TABLE IF NOT EXISTS `n_threads_fts` USING fts5(
+    `n_name`,
+    content='n_threads',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS `trg_threads_fts_insert`
+AFTER INSERT ON `n_threads`
+FOR EACH ROW
+BEGIN
+    INSERT INTO `n_threads_fts` (`rowid`, `n_name`) VALUES (NEW.`id`, NEW.`n_name`);
+END;
+
+CREATE TRIGGER IF NOT EXISTS `trg_threads_fts_delete`
+AFTER DELETE ON `n_threads`
+FOR EACH ROW
+BEGIN
+    INSERT INTO `n_threads_fts` (`n_threads_fts`, `rowid`, `n_name`) VALUES ('delete', OLD.`id`, OLD.`n_name`);
+END;
+
+CREATE TRIGGER IF NOT EXISTS `trg_threads_fts_update`
+AFTER UPDATE OF `n_name` ON `n_threads`
+FOR EACH ROW
+BEGIN
+    INSERT INTO `n_threads_fts` (`n_threads_fts`, `rowid`, `n_name`) VALUES ('delete', OLD.`id`, OLD.`n_name`);
+    INSERT INTO `n_threads_fts` (`rowid`, `n_name`) VALUES (NEW.`id`, NEW.`n_name`);
+END;
+
+-- 建完索引后按存量数据重建一次（幂等：先清空再按内容表重扫）
+INSERT INTO `n_threads_fts` (`n_threads_fts`) VALUES ('rebuild');
 

@@ -92,7 +92,14 @@ const MEMORY_MAX_ENTRIES = 500;
 export async function getOrSetMemoryCache(key, ttlSeconds, fetchFunction) {
     const now = Date.now();
     const hit = memoryCache.get(key);
-    if (hit && hit.expire > now) return hit.value;
+    if (hit && hit.expire > now) {
+        /* 命中后移到队尾：Map 保持插入顺序，淘汰时丢弃最久未使用的条目（近似 LRU） */
+        memoryCache.delete(key);
+        memoryCache.set(key, hit);
+        return hit.value;
+    }
+    /* 顺带清理已过期条目，避免其占用容量导致热点被提前淘汰 */
+    if (hit) memoryCache.delete(key);
 
     const pending = memoryInflight.get(key);
     if (pending) return pending;

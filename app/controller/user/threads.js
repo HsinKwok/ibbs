@@ -1,8 +1,7 @@
 import AssignMedal from "./medal.js";
+/* 帖子字段归一/校验与长度上限与管理员端共用，避免两端规则漂移 */
+import { normalizeThreadFields, deleteThreadsCascade, TITLE_MAX_LEN, CONTENT_MAX_LEN } from "../../imp/Tools.js";
 
-/* 输入长度上限 */
-const TITLE_MAX_LEN = 100;
-const CONTENT_MAX_LEN = 5000;
 /* 帖子价格上限 */
 const PRICE_MAX = 1000000;
 /* 频控：每用户 60 秒内最多发帖/评论数 */
@@ -18,55 +17,6 @@ const RATE_TTL = 60;
 /* 频控：每 IP 60 秒内最多发帖/评论数。用户维度限流可被换号绕过，IP 维度做兜底约束。 */
 const POST_IP_RATE_LIMIT = 20;
 const COMMENT_IP_RATE_LIMIT = 30;
-
-/* 帖子权限：'1' 免费 / '2' 积分 / '3' 余额 */
-const PERMISSION_VALUES = ['1', '2', '3'];
-/* 资源数据（前端 JSON.stringify(resources) 得到的 JSON 数组字符串）长度上限 */
-const RESOURCES_MAX_LEN = 100000;
-
-/* 归一化并校验帖子的权限/资源/媒体标志位，仅处理显式传入的字段。
-   返回 { error } 表示校验失败，否则返回 { data }（仅含传入字段，已归一）。 */
-function normalizeThreadFields(source) {
-    const data = {};
-
-    if (source.n_permission !== undefined) {
-        const permission = String(source.n_permission);
-        if (!PERMISSION_VALUES.includes(permission)) {
-            return { error: '权限类型不合法' };
-        }
-        data.n_permission = permission;
-    }
-
-    if (source.n_resources !== undefined) {
-        const raw = source.n_resources;
-        if (raw === null || raw === '' || raw === 'null') {
-            data.n_resources = '[]';
-        } else {
-            if (typeof raw !== 'string' || raw.length > RESOURCES_MAX_LEN) {
-                return { error: '资源数据不合法' };
-            }
-            let parsed;
-            try {
-                parsed = JSON.parse(raw);
-            } catch (error) {
-                return { error: '资源数据不合法' };
-            }
-            if (!Array.isArray(parsed)) {
-                return { error: '资源数据不合法' };
-            }
-            data.n_resources = raw;
-        }
-    }
-
-    /* 媒体标志位：1 有 / 2 无（前端默认 2），统一归一为数字 */
-    for (const key of ['n_haveimage', 'n_havevideo']) {
-        if (source[key] !== undefined) {
-            data[key] = Number(source[key]) === 1 ? 1 : 2;
-        }
-    }
-
-    return { data };
-}
 
 /* 勋章结算属于非关键路径（失败不应影响发帖/评论结果）：有 ctx 时用 waitUntil 移到响应之后执行，
    无 ctx（本地/测试）时同步等待，保证行为一致 */
@@ -301,30 +251,8 @@ export default {
             return global.sendMsg(reply, 403, '无权限');
         }
 
-        /* 删除前取出关联分类与评论数，用于删除后对称递减热度 */
-        const hotRows = await global.db.query('SELECT DISTINCT n_cid FROM n_tclist WHERE n_tid = ?', [pre.id]);
-        /* 每条评论对帖子所属每个分类各贡献 1 热度（见 CommentThreads），删帖级联删除评论时须一并回收 */
-        const commentRows = await global.db.query('SELECT COUNT(*) AS c FROM n_comment WHERE n_tid = ?', [pre.id]);
-        const hotDec = (commentRows[0]?.c || 0) + 1;
-
-        /* 全部删除与热度递减合并为一次 batch，保证原子性：避免部分写入后失败留下孤儿数据 */
-        const statements = [
-            { sql: 'DELETE FROM n_tclist WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_comment WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads_like WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads_buy WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_report WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads WHERE id = ?', params: [pre.id] }
-        ];
-        /* 每帖对每个唯一分类贡献 1 热度，其下评论又各贡献 1 热度；删除后按 hotDec 同步递减。
-           按 chunkArray 分片避免超过 D1 参数上限 */
-        for (const chunk of global.Tools.chunkArray(hotRows.map((row) => row.n_cid))) {
-            statements.push({
-                sql: `UPDATE n_class SET n_hotnum = n_hotnum - ? WHERE id IN (${chunk.map(() => '?').join(', ')})`,
-                params: [hotDec, ...chunk]
-            });
-        }
-        await global.db.batch(statements);
+        /* 级联删除关联数据并对称回收分类热度（与管理员端共用同一实现） */
+        await deleteThreadsCascade(pre.id);
         global.sendMsg(reply, 200, '删除成功');
 
     }),
@@ -408,13 +336,16 @@ export default {
         const clientIp = global.Tools.getClientIp(request);
         const userRateKey = `thread:comment:${Ware.id}`;
         const ipRateKey = `thread:comment:ip:${clientIp}`;
-        const userAllowed = await global.Tools.checkRateLimit(
-            isNewUser ? 'commentUserNew' : 'commentUser',
-            userRateKey,
-            isNewUser ? COMMENT_RATE_LIMIT_NEW : COMMENT_RATE_LIMIT,
-            RATE_TTL
-        );
-        const ipAllowed = await global.Tools.checkRateLimit('commentIp', ipRateKey, COMMENT_IP_RATE_LIMIT, RATE_TTL);
+        /* 用户级与 IP 级限流互不依赖，并行计数以省掉一次串行往返 */
+        const [userAllowed, ipAllowed] = await Promise.all([
+            global.Tools.checkRateLimit(
+                isNewUser ? 'commentUserNew' : 'commentUser',
+                userRateKey,
+                isNewUser ? COMMENT_RATE_LIMIT_NEW : COMMENT_RATE_LIMIT,
+                RATE_TTL
+            ),
+            global.Tools.checkRateLimit('commentIp', ipRateKey, COMMENT_IP_RATE_LIMIT, RATE_TTL)
+        ]);
         if (!userAllowed || !ipAllowed) {
             return global.sendMsg(reply, 201, '评论过于频繁，请稍后再试');
         }
@@ -457,7 +388,7 @@ export default {
         const Ware = request.Ware;
         const pre = request.body;
         /* 获取评论信息 */
-        const Comment = await global.db.query('SELECT * FROM n_comment WHERE id = ?', [pre.id]);
+        const Comment = await global.db.query('SELECT n_uid, n_tid FROM n_comment WHERE id = ?', [pre.id]);
         if (!Comment || Comment.length === 0) {
             return global.sendMsg(reply, 404, '评论不存在');
         }

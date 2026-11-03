@@ -91,7 +91,7 @@ export default {
         /* 最近一条消息内容、未读数、对方用户信息三者相互独立，并行查询减少 D1 往返 */
         const [lastMsgs, unreadRows, users] = await Promise.all([
             global.Tools.queryInChunks(lastIds, (c) => global.db.query(
-                `SELECT * FROM n_user_msg WHERE id IN (${c.map(() => '?').join(', ')})`,
+                `SELECT id, n_content, n_time, n_from, n_recall FROM n_user_msg WHERE id IN (${c.map(() => '?').join(', ')})`,
                 c
             )),
             global.db.query(
@@ -185,7 +185,7 @@ export default {
             return;
         }
 
-        const rows = await global.db.query('SELECT * FROM n_user_msg WHERE id = ?', [id]);
+        const rows = await global.db.query('SELECT n_from, n_recall, n_time FROM n_user_msg WHERE id = ?', [id]);
         if (rows.length === 0) {
             global.sendMsg(reply, 404, '消息不存在');
             return;

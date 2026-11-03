@@ -1,11 +1,13 @@
-import UserInfo from './info.js';
+/* 提现方式属低频变更的公共数据，进程内缓存 300 秒 */
+const CACHE_TTL = 300;
+
 export default {
 
     /* 获取提现方式 n_withdraw_method */
     GetWithdrawMethod: (request, reply) => global.Fun(reply, async () => {
-        const Ware = request.Ware;
-        const pre = request.body;
-        const method = await global.db.query('SELECT * FROM n_withdraw_method where n_off = 1');
+        const fetcher = () => global.db.query('SELECT * FROM n_withdraw_method where n_off = 1');
+        const cache = global.RedisUtils?.getOrSetMemoryCache;
+        const method = cache ? await cache('withdrawmethod:list:v1', CACHE_TTL, fetcher) : await fetcher();
         global.sendMsg(reply, 200, '获取成功', method);
     }),
 
@@ -14,19 +16,37 @@ export default {
         const Ware = request.Ware;
         const pre = request.body;
 
+        /* 配置、用户+会员组参数、提现方式三者互不依赖，并行读取，
+           把原来的「配置 → 用户 → 会员组 → 提现方式」4 次串行往返压缩为 1 次 */
+        const [config, rows, methodRows] = await Promise.all([
+            global.Tools.getConfig(),
+            /* 一次 JOIN 取余额与会员组提现参数；组缺失或为 0 时回退默认组，语义与 getVipInfo 一致 */
+            global.db.query(
+                `SELECT u.id, u.n_balance, g.n_withdrawal_min, g.n_withdrawal_max, g.n_withdrawal_fee
+                 FROM n_users u
+                 LEFT JOIN n_usergroup g ON g.id = COALESCE(
+                     (SELECT id FROM n_usergroup WHERE id = u.n_group_id),
+                     (SELECT id FROM n_usergroup WHERE n_deft = 1 LIMIT 1)
+                 )
+                 WHERE u.id = ?`,
+                [Ware.id]
+            ),
+            pre.n_method
+                ? global.db.query("SELECT id FROM n_withdraw_method WHERE n_code = ? AND n_off = '1'", [String(pre.n_method)])
+                : Promise.resolve([])
+        ]);
+
         /* 提现功能开关（'1' 表示开启） */
-        const config = await global.Tools.getConfig();
         if (!config.length || config[0].n_wallet_withdraw_off !== '1') {
             global.sendMsg(reply, 403, '提现功能已关闭');
             return;
         }
 
-        const users = await global.db.query('SELECT * FROM n_users where id = ?', [Ware.id]);
-        if (users.length === 0) {
+        if (rows.length === 0) {
             global.sendMsg(reply, 201, '用户不存在');
             return;
         }
-        let Vinfo = await UserInfo.getVipInfo(Ware.id, users[0])
+        const user = rows[0];
 
         /* 金额校验：必须为合法数字，避免 NaN 绕过后续比较 */
         if (pre.n_amount === undefined || pre.n_amount === null || pre.n_amount === '') {
@@ -43,14 +63,13 @@ export default {
             global.sendMsg(reply, 201, '请选择提现方式');
             return;
         }
-        const methodRows = await global.db.query("SELECT id FROM n_withdraw_method WHERE n_code = ? AND n_off = '1'", [String(pre.n_method)]);
         if (methodRows.length === 0) {
             global.sendMsg(reply, 201, '提现方式不存在或已停用');
             return;
         }
         /* 提现上下限：配置字段缺失或非数字时跳过对应比较，避免 NaN 比较恒为 false 而绕过限制 */
-        const minRaw = Number(Vinfo.n_withdrawal_min);
-        const maxRaw = Number(Vinfo.n_withdrawal_max);
+        const minRaw = Number(user.n_withdrawal_min);
+        const maxRaw = Number(user.n_withdrawal_max);
         if (Number.isFinite(minRaw) && amount < minRaw) {
             global.sendMsg(reply, 201, '提现金额低于最低提现额度');
             return;
@@ -59,7 +78,7 @@ export default {
             global.sendMsg(reply, 201, '提现金额高于最高提现额度');
             return;
         }
-        if (users[0].n_balance < amount) {
+        if (user.n_balance < amount) {
             global.sendMsg(reply, 201, '余额不足');
             return;
         }
@@ -82,7 +101,7 @@ export default {
         }
 
         /* 获取用户手续费；字段缺失或非数字时兜底为 0，避免 NaN 写入手续费/到账金额 */
-        const feeRaw = Number(Vinfo.n_withdrawal_fee)
+        const feeRaw = Number(user.n_withdrawal_fee)
         const fee = Number.isFinite(feeRaw) ? feeRaw / 100 : 0
         const handlingFee = amount * fee
 

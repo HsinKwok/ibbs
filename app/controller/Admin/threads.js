@@ -1,63 +1,28 @@
 
-/* 帖子权限：'1' 免费 / '2' 积分 / '3' 余额 */
-const PERMISSION_VALUES = ['1', '2', '3'];
-/* 资源数据（前端 JSON.stringify(resources) 得到的 JSON 数组字符串）长度上限 */
-const RESOURCES_MAX_LEN = 100000;
-/* 输入长度上限（与 user/threads.js 保持一致，避免管理员端绕过限制） */
-const TITLE_MAX_LEN = 100;
-const CONTENT_MAX_LEN = 5000;
-
-/* 归一化并校验帖子的权限/资源/媒体标志位，仅处理显式传入的字段。
-   返回 { error } 表示校验失败，否则返回 { data }（仅含传入字段，已归一）。
-   与 user/threads.js 的该函数保持一致，避免管理员端绕过校验写入非法值。 */
-function normalizeThreadFields(source) {
-    const data = {};
-
-    if (source.n_permission !== undefined) {
-        const permission = String(source.n_permission);
-        if (!PERMISSION_VALUES.includes(permission)) {
-            return { error: '权限类型不合法' };
-        }
-        data.n_permission = permission;
-    }
-
-    if (source.n_resources !== undefined) {
-        const raw = source.n_resources;
-        if (raw === null || raw === '' || raw === 'null') {
-            data.n_resources = '[]';
-        } else {
-            if (typeof raw !== 'string' || raw.length > RESOURCES_MAX_LEN) {
-                return { error: '资源数据不合法' };
-            }
-            let parsed;
-            try {
-                parsed = JSON.parse(raw);
-            } catch (error) {
-                return { error: '资源数据不合法' };
-            }
-            if (!Array.isArray(parsed)) {
-                return { error: '资源数据不合法' };
-            }
-            data.n_resources = raw;
-        }
-    }
-
-    /* 媒体标志位：1 有 / 2 无（前端默认 2），统一归一为数字 */
-    for (const key of ['n_haveimage', 'n_havevideo']) {
-        if (source[key] !== undefined) {
-            data[key] = Number(source[key]) === 1 ? 1 : 2;
-        }
-    }
-
-    return { data };
-}
+/* 帖子字段归一/校验、长度上限与级联删除与用户端共用，避免两端规则漂移 */
+import { normalizeThreadFields, deleteThreadsCascade, TITLE_MAX_LEN, CONTENT_MAX_LEN } from "../../imp/Tools.js";
 
 export default {
     /*  */
     GetThreads: (request, reply) => global.Fun(reply, async () => {
         const pre = request.body;
         if (pre.id) {
-            const res = await global.db.query('SELECT id, n_name, n_uid, n_time, n_html, n_read, n_starts, n_msgs, n_profile, n_permission, n_price, n_resources, n_haveimage, n_havevideo, n_msglastTime FROM n_threads WHERE id = ?', [pre.id])
+            /* 一次 batch 取齐帖子、作者、分类：作者与分类均用子查询解依赖，
+               避免帖子→用户→分类关系→分类的 4 次串行往返 */
+            const [res, User, Category] = await global.db.queryBatch([
+                {
+                    sql: 'SELECT id, n_name, n_uid, n_time, n_html, n_read, n_starts, n_msgs, n_profile, n_permission, n_price, n_resources, n_haveimage, n_havevideo, n_msglastTime FROM n_threads WHERE id = ?',
+                    params: [pre.id]
+                },
+                {
+                    sql: 'SELECT id, n_nickname, n_avatar FROM n_users WHERE id = (SELECT n_uid FROM n_threads WHERE id = ?)',
+                    params: [pre.id]
+                },
+                {
+                    sql: 'SELECT id, n_name, n_type, n_icon FROM n_class WHERE id IN (SELECT n_cid FROM n_tclist WHERE n_tid = ?)',
+                    params: [pre.id]
+                }
+            ]);
             if (res.length == 0) {
                 global.sendMsg(reply, 404, '帖子不存在');
                 return;
@@ -65,7 +30,6 @@ export default {
             const thread = res[0];
 
             // 获取用户信息（仅取公开展示字段，避免下发邮箱/余额等敏感信息）
-            const User = await global.db.query(`SELECT id, n_nickname, n_avatar FROM n_users WHERE id = ?`, [thread.n_uid]);
             if (User.length > 0) {
                 thread.user = User[0];
             } else {
@@ -78,17 +42,7 @@ export default {
                 };
             }
 
-            // 获取分类关系
-            const Tclist = await global.db.query(`SELECT n_cid FROM n_tclist WHERE n_tid = ?`, [pre.id]);
-
-            // 获取分类信息
-            if (Tclist.length > 0) {
-                const CID = Tclist.map(item => item.n_cid);
-                const Category = await global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (${CID.map(() => '?').join(',')})`, CID);
-                thread.category = Category;
-            } else {
-                thread.category = [];
-            }
+            thread.category = Category;
 
             global.sendMsg(reply, 200, '获取成功', thread);
 
@@ -117,12 +71,16 @@ export default {
         if (res.data.length === 0) {
             return global.sendMsg(reply, 200, '获取成功', [], res.total);
         }
-        let Userid = []
-        for (let a in res.data) {
-            Userid.push(res.data[a].n_uid)
+        const Userid = res.data.map(thread => thread.n_uid);
+        const tids = res.data.map(item => item.id);
+        /* 作者、帖子-分类关系、分类三者互不依赖，全部并行；分类用子查询解掉对 Tclist 的依赖，
+           把原来的「作者 → 分类关系 → 分类」三层串行压缩为一次并行往返 */
+        const [User, Tclist, Category] = await Promise.all([
+            global.Tools.queryInChunks(Userid, (c) => global.db.query(`SELECT id,n_nickname,n_avatar FROM n_users WHERE id IN (${c.map(() => '?').join(',')})`, c)),
+            global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT n_cid,n_tid FROM n_tclist WHERE n_tid IN (${c.map(() => '?').join(',')})`, c)),
+            global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (SELECT n_cid FROM n_tclist WHERE n_tid IN (${c.map(() => '?').join(',')}))`, c))
+        ]);
 
-        }
-        const User = await global.Tools.queryInChunks(Userid, (c) => global.db.query(`SELECT id,n_nickname,n_avatar FROM n_users WHERE id IN (${c.map(() => '?').join(',')})`, c))
         // 将用户信息添加到帖子数据中
         const userMap = User.reduce((acc, user) => {
             acc[user.id] = user;
@@ -140,25 +98,14 @@ export default {
             return thread;
         });
 
-        /* 获取分类以及话题 */
-        const tids = res.data.map(item => item.id);
-        const Tclist = await global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT n_cid,n_tid FROM n_tclist WHERE n_tid IN (${c.map(() => '?').join(',')})`, c))
-        let CID = []
-        for (let a in Tclist) {
-            CID.push(Tclist[a].n_cid)
-        }
-        /* 获取分类（帖子可能未关联任何分类，此时 CID 为空，需避免生成非法 SQL：IN ()） */
-        let Category = []
-        if (CID.length > 0) {
-            Category = await global.Tools.queryInChunks([...new Set(CID)], (c) => global.db.query(`SELECT id,n_name,n_type,n_icon FROM n_class WHERE id IN (${c.map(() => '?').join(',')})`, c))
-        }
-        // 建立分类映射关系
+        // 建立分类映射关系（分片查询可能重复返回同一分类，先按 id 去重）
+        const categoryMap = new Map(Category.map(cat => [cat.id, cat]));
         const threadCategoryMap = {};
-        for (let item of Tclist) {
+        for (const item of Tclist) {
             if (!threadCategoryMap[item.n_tid]) {
                 threadCategoryMap[item.n_tid] = [];
             }
-            const category = Category.find(cat => cat.id === item.n_cid);
+            const category = categoryMap.get(item.n_cid);
             if (category) {
                 threadCategoryMap[item.n_tid].push(category);
             }
@@ -175,26 +122,8 @@ export default {
     DeleteThread: (request, reply) => global.Fun(reply, async () => {
 
         const pre = request.body;
-        /* 删除前取出关联分类与评论数，用于删除后对称递减热度 */
-        const hotRows = await global.db.query('SELECT DISTINCT n_cid FROM n_tclist WHERE n_tid = ?', [pre.id]);
-        /* 每条评论对帖子所属每个分类各贡献 1 热度（见 user/threads.js CommentThreads），级联删评论时须一并回收 */
-        const commentRows = await global.db.query('SELECT COUNT(*) AS c FROM n_comment WHERE n_tid = ?', [pre.id]);
-        const hotDec = (commentRows[0]?.c || 0) + 1;
-        /* 级联删除关联分类、评论、点赞、购买、举报与帖子本身，并对称递减各分类热度，
-           全部置于同一事务（D1 batch），避免中途失败残留孤儿数据或热度计数错乱 */
-        const statements = [
-            { sql: 'DELETE FROM n_tclist WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_comment WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads_like WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads_buy WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_report WHERE n_tid = ?', params: [pre.id] },
-            { sql: 'DELETE FROM n_threads WHERE id = ?', params: [pre.id] },
-        ];
-        /* 每帖及其评论对每个唯一分类各贡献热度，删除后按 hotDec 同步递减 */
-        for (const row of hotRows) {
-            statements.push({ sql: 'UPDATE n_class SET n_hotnum = n_hotnum - ? WHERE id = ?', params: [hotDec, row.n_cid] });
-        }
-        await global.db.batch(statements);
+        /* 级联删除关联数据与热度回收，全部置于同一 D1 batch（事务） */
+        await deleteThreadsCascade(pre.id);
         global.sendMsg(reply, 200, '删除成功');
     }),
     /* 批量删除帖子 */
@@ -209,35 +138,8 @@ export default {
             global.sendMsg(reply, 201, `单次最多操作 ${global.Tools.MAX_BATCH_IDS} 条`);
             return;
         }
-        const placeholders = ids.map(() => '?').join(',');
-        /* 删除前按分类聚合帖子数，用于删除后同步递减热度 */
-        const hotRows = await global.db.query(
-            `SELECT n_cid, COUNT(DISTINCT n_tid) AS c FROM n_tclist WHERE n_tid IN (${placeholders}) GROUP BY n_cid`,
-            ids
-        );
-        /* 每条评论对其帖子所属每个分类各贡献 1 热度，级联删评论时按分类一并回收 */
-        const commentHotRows = await global.db.query(
-            `SELECT tc.n_cid, COUNT(c.id) AS cc FROM n_tclist tc JOIN n_comment c ON c.n_tid = tc.n_tid WHERE tc.n_tid IN (${placeholders}) GROUP BY tc.n_cid`,
-            ids
-        );
-        const commentHotMap = {};
-        for (const row of commentHotRows) {
-            commentHotMap[row.n_cid] = row.cc;
-        }
         /* 级联删除与热度递减置于同一事务，避免中途失败残留孤儿数据 */
-        const statements = [
-            { sql: `DELETE FROM n_tclist WHERE n_tid IN (${placeholders})`, params: ids },
-            { sql: `DELETE FROM n_comment WHERE n_tid IN (${placeholders})`, params: ids },
-            { sql: `DELETE FROM n_threads_like WHERE n_tid IN (${placeholders})`, params: ids },
-            { sql: `DELETE FROM n_threads_buy WHERE n_tid IN (${placeholders})`, params: ids },
-            { sql: `DELETE FROM n_report WHERE n_tid IN (${placeholders})`, params: ids },
-            { sql: `DELETE FROM n_threads WHERE id IN (${placeholders})`, params: ids },
-        ];
-        for (const row of hotRows) {
-            const dec = row.c + (commentHotMap[row.n_cid] || 0);
-            statements.push({ sql: 'UPDATE n_class SET n_hotnum = n_hotnum - ? WHERE id = ?', params: [dec, row.n_cid] });
-        }
-        await global.db.batch(statements);
+        await deleteThreadsCascade(ids);
         global.sendMsg(reply, 200, '删除成功');
     }),
     /* 编辑帖子 */
@@ -318,36 +220,22 @@ export default {
         if (res.data.length === 0) {
             return global.sendMsg(reply, 200, '获取成功', [], res.total);
         }
-        /* 获取用户信息 */
-        let Userid = []
-        let Tid = []
-        for (let a in res.data) {
-            Userid.push(res.data[a].n_uid)
-            Tid.push(res.data[a].n_tid)
+        /* 分页内 uid/tid 会重复出现，先去重再分批查询，减少绑定参数与返回行数 */
+        const userIds = [...new Set(res.data.map(comment => comment.n_uid))];
+        const tids = [...new Set(res.data.map(comment => comment.n_tid))];
+        /* 用户信息与帖子信息互不依赖，并行查询省掉一段串行往返 */
+        const [User, Thread] = await Promise.all([
+            global.Tools.queryInChunks(userIds, (c) => global.db.query(`SELECT id,n_nickname,n_avatar FROM n_users WHERE id IN (${c.map(() => '?').join(',')})`, c)),
+            /* 仅取评论卡片展示所需列 */
+            global.Tools.queryInChunks(tids, (c) => global.db.query(`SELECT id, n_name, n_read, n_msgs, n_starts, n_permission, n_price FROM n_threads WHERE id IN (${c.map(() => '?').join(',')})`, c))
+        ]);
+        const userMap = new Map(User.map(user => [user.id, user]));
+        const threadMap = new Map(Thread.map(thread => [thread.id, thread]));
+        /* 原地赋值，避免重建整个数组 */
+        for (const comment of res.data) {
+            comment.user = userMap.get(comment.n_uid);
+            comment.thread = threadMap.get(comment.n_tid);
         }
-        const User = await global.Tools.queryInChunks(Userid, (c) => global.db.query(`SELECT id,n_nickname,n_avatar FROM n_users WHERE id IN (${c.map(() => '?').join(',')})`, c))
-        // 将用户信息添加到评论数据中
-        const userMap = User.reduce((acc, user) => {
-            acc[user.id] = user;
-            return acc;
-        }, {});
-
-        res.data = res.data.map(comment => {
-            comment.user = userMap[comment.n_uid];
-            return comment;
-        });
-
-        /* 获取帖子信息（仅取评论卡片展示所需列） */
-        const Thread = await global.Tools.queryInChunks(Tid, (c) => global.db.query(`SELECT id, n_name, n_read, n_msgs, n_starts, n_permission, n_price FROM n_threads WHERE id IN (${c.map(() => '?').join(',')})`, c))
-        const threadMap = Thread.reduce((acc, thread) => {
-            acc[thread.id] = thread;
-            return acc;
-        }, {});
-
-        res.data = res.data.map(comment => {
-            comment.thread = threadMap[comment.n_tid];
-            return comment;
-        });
 
         global.sendMsg(reply, 200, '获取成功', res.data, res.total);
     }),
