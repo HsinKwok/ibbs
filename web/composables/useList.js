@@ -12,6 +12,7 @@ import { Message } from '@arco-design/web-vue'
  * @param {boolean} [options.autoLoad]  是否 onMounted 自动加载，默认 true
  * @param {(data: any[]) => void} [options.onLoad] 加载完成回调（用于联动）
  * @param {'page'|'cursor'} [options.pagination] 分页模式：page（常规分页，默认）/ cursor（R2 游标分页）
+ * @param {object} [options.initial]      首屏 SSR 预取结果（页面内 await useApiSsr 得到）；命中时跳过 onMounted 的首次请求
  *
  * @example
  * // 前台纯查询列表（常规分页）
@@ -21,7 +22,7 @@ import { Message } from '@arco-design/web-vue'
  * // R2 游标分页列表
  * const { list, loading, load, refresh, nextPage, prevPage, page, truncated } = useList({ api: '/api/getUploadFileList', pagination: 'cursor' })
  */
-export function useList({ api, extraQuery = {}, autoLoad = true, onLoad = null, pagination = 'page' }) {
+export function useList({ api, extraQuery = {}, autoLoad = true, onLoad = null, pagination = 'page', initial = null }) {
   const list = ref([])
   const loading = ref(false)
 
@@ -88,6 +89,18 @@ export function useList({ api, extraQuery = {}, autoLoad = true, onLoad = null, 
   // 常规 page/pagesize 分页
   const query = ref({ page: 1, pagesize: 20, total: 0, ...extraQuery })
 
+  // 首屏是否已由 SSR 预取填充：命中时跳过 onMounted 的首次加载，避免多一次往返
+  const hasInitial = ref(false)
+
+  /* 首屏 SSR 预取结果（页面内 await useApiSsr 后传入）：
+     公开页的列表内容与登录身份无关，可由服务端取到并随 HTML/payload 下发，客户端水合时直接复用 */
+  if (initial && initial.code === 200) {
+    list.value = initial.data || []
+    query.value.total = initial.total
+    hasInitial.value = true
+    if (onLoad) onLoad(list.value)
+  }
+
   // 请求序号：丢弃过期响应，避免快速翻页时旧数据覆盖新数据
   let reqId = 0
 
@@ -124,7 +137,7 @@ export function useList({ api, extraQuery = {}, autoLoad = true, onLoad = null, 
     return scheduled
   }
 
-  if (autoLoad) onMounted(load)
+  if (autoLoad) onMounted(() => { if (!hasInitial.value) load() })
 
   return { list, query, loading, load }
 }

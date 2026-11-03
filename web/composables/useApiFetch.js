@@ -17,11 +17,29 @@ function isAdminRoute() {
   return path === base || path.startsWith(base + '/')
 }
 
+/* 必须携带登录身份才能正确渲染的路由前缀（与 middleware/user-auth.global.js 的受保护路由一致）。
+   其余前台公开页的 SSR 产物会进入 SWR 共享缓存，若携带 token 就会把点赞态、已购资源、
+   个人资料等个性化数据写进缓存并发给其他访客。
+   /follow 虽不强制登录，但列表内容按人筛选（我赞过的），也必须按请求渲染、走 swr:false。 */
+const SSR_AUTH_PREFIXES = ['/user', '/threadInfo', '/login', '/follow']
+
+/* 当前 SSR 请求是否为「公开页」：公开页一律匿名请求，个性化数据由客户端挂载后补拉 */
+export function isSsrPublicRoute() {
+  if (typeof window !== 'undefined') return true
+  const path = useRequestEvent()?.path || ''
+  if (!path) return true
+  const base = getAdminBase()
+  if (path === base || path.startsWith(base + '/')) return false
+  return !SSR_AUTH_PREFIXES.some((p) => path === p || path.startsWith(p + '/'))
+}
+
 export function useApiFetch(options = {}) {
   /* options.admin === true 时强制使用管理员令牌（AToken）：
      用于前台页面调用挂载在 ATokenVar 路由组的管理员接口（如公告编辑/删除） */
   const isAdmin = options.admin === true ? true : isAdminRoute()
-  const token = useCookie(isAdmin ? 'AToken' : 'UToken').value
+  /* options.ssrAuth === true 时即使在公开页 SSR 也携带身份（仅用于明确不会被缓存的后台/私有请求） */
+  const useToken = options.ssrAuth === true || !import.meta.server || !isSsrPublicRoute()
+  const token = useToken ? useCookie(isAdmin ? 'AToken' : 'UToken').value : null
   const apiBase = Config.apiBase
 
   const toUrlEncoded = (obj) =>

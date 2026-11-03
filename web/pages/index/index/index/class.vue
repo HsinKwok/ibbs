@@ -27,14 +27,11 @@
 </template>
 
 <script setup>
-/* 主列表：热门圈子，复用 useList */
-const { list, query, loading, load } = useList({
-    api: '/api/GetCategory',
-    extraQuery: { pagesize: 10 },
-})
-
 /* 右侧栏：热门圈子 + 热门话题，复用 useSidebar */
 const { CategoryList, TopicList } = useSidebar()
+
+/* 主列表与右侧栏展示同一份「热门圈子」，直接复用其数据，避免同一接口重复请求 */
+const list = computed(() => CategoryList.value.slice(0, 10))
 </script>
 
 

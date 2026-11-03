@@ -54,7 +54,7 @@
                             <HCaptcha ref="captchaRef" label="人机验证" hint="提交前请完成验证，用于防止恶意灌水" />
                         </div>
                         <a-form-item field="post" label="">
-                            <a-button type="primary" class="road" @click="SubmitForm()">提交</a-button>
+                            <a-button type="primary" class="road" :loading="submitting" @click="SubmitForm()">提交</a-button>
                         </a-form-item>
                     </a-form>
                 </div>
@@ -102,7 +102,10 @@ const handleResourcesUpdate = (newResources) => {
 }
 
 /* 提交函数 */
+const submitting = ref(false)
 const SubmitForm = async () => {
+    /* 防重复提交：连点会重复建帖/重复触发人机验证 */
+    if (submitting.value) return
     let subFrom = {
         ...form.value,
         n_category: JSON.stringify(form.value.n_category),
@@ -134,6 +137,7 @@ const SubmitForm = async () => {
         subFrom.h_captcha_token = token
     }
 
+    submitting.value = true
     try {
         let res;
         if (id == 'add') {
@@ -153,6 +157,8 @@ const SubmitForm = async () => {
         }
     } catch (error) {
         Message.error(error.message)
+    } finally {
+        submitting.value = false
     }
 }
 /* 右侧栏：热门圈子 + 热门话题，复用 useSidebar */

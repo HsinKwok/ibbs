@@ -46,24 +46,22 @@
 import { ref } from 'vue'
 import { Message } from '@arco-design/web-vue';
 const UserInfo = useUserInfo()
+/* 其他用户信息缓存：同一 uid 一次会话只请求一次，并与列表项等调用方共享结果 */
+const Profile = useUserProfile()
 const props = defineProps(['id', 'info'])
 let id = props.id
 const Users = ref({})
 
 
-/* 获取用户信息 GetUser */
+/* 获取用户信息 GetUser（走 Profile 缓存 + 并发去重） */
 const GetUser = async () => {
     try {
-        const res = await useApiFetch().post('/api/GetUser', {
-            id: id
-        })
-        if (res.code == 200) {
-            Users.value = res.data
-        } else if (res.code == 404) {
-            /* 用户已注销：帖子保留，展示占位信息 */
-            Users.value = { id: id, n_nickname: '该用户已被注销', isCancelled: true }
+        const data = await Profile.fetchUser(id)
+        if (data) {
+            /* 合并而非整体替换：上方 info 可能只带昵称/头像等部分字段 */
+            Users.value = { ...Users.value, ...data }
         } else {
-            Message.error(res.msg || '获取用户信息失败')
+            Message.error('获取用户信息失败')
         }
     } catch (error) {
         Message.error(error.message)
@@ -74,7 +72,9 @@ const GetUser = async () => {
 /* 监听id（id 为纯量，无需深度侦听） */
 watch(() => props.id, (newVal, oldVal) => {
     id = newVal
-    if (newVal) {
+    /* SSR 阶段的请求不会被等待、结果也进不了页面，纯属浪费一次子请求；
+       交给客户端挂载后拉取（此时会带上登录态，直接拿到 isLiked） */
+    if (newVal && import.meta.client) {
         GetUser()
     }
 }, { immediate: true })
@@ -82,7 +82,8 @@ watch(() => props.id, (newVal, oldVal) => {
 /* 监听info（info 通常整体替换引用，浅监听即可，避免深度遍历大对象） */
 watch(() => props.info, (newVal, oldVal) => {
     if (newVal) {
-        Users.value = newVal
+        /* 合并：详情页下发的作者信息只含 id/昵称/头像，不能覆盖已取回的统计与关注态 */
+        Users.value = { ...Users.value, ...newVal }
         id = newVal.id
     }
 }, { immediate: true })
@@ -98,7 +99,9 @@ const LikeUser = async () => {
         })
         if (res.code == 200) {
             Message.success(res.msg)
-            GetUser()
+            /* 关注态是缓存的：先清掉该用户缓存再拉取，才能拿到最新 isLiked */
+            delete Profile.users[String(Users.value.id)]
+            await GetUser()
         } else {
             Message.error(res.msg || '关注失败')
         }

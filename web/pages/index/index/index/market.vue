@@ -140,10 +140,14 @@
 <script setup>
 import { Message } from '@arco-design/web-vue'
 
-/* 主列表：跳蚤市场，复用 useList（仅查看） */
+/* 主列表：跳蚤市场，复用 useList（仅查看）。
+   首屏在服务端预取（商品列表为公开只读数据，与登录身份无关），客户端不再重复请求 */
+const ListQuery = { pagesize: 10 }
+const initial = await useApiSsr('market:list:1', '/api/GetMarketList', { page: 1, ...ListQuery })
 const { list, query, loading, load } = useList({
     api: '/api/GetMarketList',
-    extraQuery: { pagesize: 10 },
+    extraQuery: ListQuery,
+    initial,
 })
 
 /* 搜索后回到第一页再查询，避免停留在过滤前的越界页码导致空列表 */

@@ -66,12 +66,14 @@
 </template>
 
 <script setup>
-/* 主列表：帖子列表，复用 useList */
+/* 主列表：帖子列表，复用 useList。
+   首屏在服务端预取（列表内容与登录身份无关），随 HTML 下发，客户端不再重复请求 */
+const ListQuery = { pagesize: 10, search: '', sort: 'id' }
+const initial = await useApiSsr('index:threads:1', '/api/GetThreads', { page: 1, ...ListQuery })
 const { list, query, loading, load } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, search: '', sort: 'id' },
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial,
 })
 
 /* 搜索/排序变更后回到第一页再查询，避免停留在过滤前的越界页码导致空列表 */

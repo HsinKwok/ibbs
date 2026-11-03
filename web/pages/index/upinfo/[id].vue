@@ -118,12 +118,18 @@ const route = useRoute()
 const id = route.params.id
 const SiteConfig = useSiteConfig()
 const UserInfo = useUserInfo()
+/* 其他用户信息缓存（关注后需失效重取） */
+const Profile = useUserProfile()
 const Users = ref({})
 
-/* 获取用户信息 GetUser */
-const res = await useApiSsr('GetUser' + id, '/api/GetUser', {
-    id: id
-})
+/* 用户信息与首屏帖子互不依赖，合并为一次并发预取，省掉一段串行往返。
+   SSR 一律匿名（页面会进 SWR 共享缓存），isLiked 等个性化字段由下方 watch 在客户端补拉；
+   列表内容与登录身份无关，可随 HTML 下发（客户端不再重复请求） */
+const ListQuery = { pagesize: 10, uid: id }
+const [res, initialThreads] = await Promise.all([
+    useApiSsr('GetUser' + id, '/api/GetUser', { id: id }),
+    useApiSsr('upinfo:threads:' + id, '/api/GetThreads', { page: 1, ...ListQuery })
+])
 if (res.code == 200) {
     Users.value = res.data
 } else if (import.meta.client) {
@@ -131,18 +137,26 @@ if (res.code == 200) {
     Message.error(res.msg || '获取用户信息失败')
 }
 
+/* 登录后补拉带身份的用户信息，取回 isLiked（关注态）；匿名访客 uid 为空直接返回 */
+watch(() => UserInfo.$state.UserInfo?.id, async (uid) => {
+    if (!uid) return
+    const info = await useApiFetch().post('/api/GetUser', { id: id })
+    if (info?.code == 200) {
+        Users.value = info.data
+    }
+}, { immediate: true })
+
 useSeoSet({
     title: Users.value.n_nickname + ' - ' + SiteConfig.$state.Config.n_web_title,
 })
 /* 右侧栏：热门圈子 + 热门话题，复用 useSidebar */
 const { CategoryList, TopicList } = useSidebar()
 
-/* 主列表：UP 主帖子，复用 useList */
+/* 主列表：UP 主帖子，复用 useList（initial 来自上方并发预取） */
 const { list, query, loading, load } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, uid: id },
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial: initialThreads,
 })
 
 /* 获取评论列表 */
@@ -154,6 +168,8 @@ const GetCommentsFrom = ref({
 })
 const CommentList = ref([])
 const commentLoading = ref(false)
+/* 评论只在切到「他的评论」标签时才需要，避免首屏多发一次用不到的请求 */
+const commentLoaded = ref(false)
 const GetCommentList = async () => {
     try {
         commentLoading.value = true
@@ -161,6 +177,7 @@ const GetCommentList = async () => {
         if (res.code == 200) {
             CommentList.value = res.data
             GetCommentsFrom.value.total = res.total
+            commentLoaded.value = true
         } else {
         }
     } catch (error) {
@@ -170,12 +187,15 @@ const GetCommentList = async () => {
     }
 }
 
-onMounted(() => {
-    GetCommentList()
-})
-
 
 const ShowIndex = ref('1')
+
+/* 首次切到评论标签时再拉取（之后切换/翻页走各自的事件） */
+watch(ShowIndex, (val) => {
+    if (val === '2' && !commentLoaded.value && !commentLoading.value) {
+        GetCommentList()
+    }
+})
 
 /* 关注用户 LikeUser：后端为切换式（关注/取消关注），成功后重新拉取以同步真实状态 */
 const followLoading = ref(false)
@@ -185,8 +205,10 @@ const LikeUser = async () => {
         const res = await useApiFetch().post('/api/LikeUser', { id: Users.value.id })
         if (res.code == 200) {
             Message.success(res.msg)
-            const info = await useApiFetch().post('/api/GetUser', { id: id })
-            if (info.code == 200) Users.value = info.data
+            /* 关注态有缓存：先清掉该用户，再走 Profile 重取，顺带同步给其他使用方 */
+            delete Profile.users[String(id)]
+            const info = await Profile.fetchUser(id)
+            if (info) Users.value = info
         } else {
             Message.error(res.msg || '关注失败')
         }

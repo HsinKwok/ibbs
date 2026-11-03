@@ -47,12 +47,14 @@
 </template>
 
 <script setup>
-/* 主列表：我关注的帖子，复用 useList */
+/* 主列表：我关注的帖子，复用 useList。
+   /follow 为按请求渲染（swr:false）且 SSR 携带登录态，首屏直接在服务端取到我的列表 */
+const ListQuery = { pagesize: 10, isMyLike: 1 }
+const initial = await useApiSsr('follow:threads:1', '/api/GetThreads', { page: 1, ...ListQuery })
 const { list, query, loading, load } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, isMyLike: 1 },
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial,
 })
 
 /* 搜索后回到第一页再查询，避免停留在过滤前的越界页码导致空列表 */

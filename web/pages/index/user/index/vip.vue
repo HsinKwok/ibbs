@@ -121,30 +121,34 @@
 
 <script setup>
 import { Message } from '@arco-design/web-vue';
+
+/* 会员类型 → 默认类型价格：SSR 串行预取（第二步依赖第一步的首项 id），
+   首屏即可直接购买，客户端省去挂载后的 2 次串行请求 */
+const vipListRes = await useApiSsr('user:vipList', '/api/getVipList')
+
 /* 获取应用列表信息 */
-const Viplist = ref([])
+const Viplist = ref(vipListRes.code === 200 ? vipListRes.data : [])
 /* 获取会员列表 */
 const buying = ref(false)
-const GetVipList = async () => {
-    const res = await useApiFetch().post('/api/getVipList')
-    if (res.code === 200) {
-        Viplist.value = res.data
-        VipActive.value = res.data[0]?.id || 0
-        VipInfo.value = res.data[0]
-        GetVipPrice()
-    } else {
-        Message.error(res.msg)
-    }
-}
 
-const VipActive = ref(0)
+const VipActive = ref(Viplist.value[0]?.id || 0)
 const from = ref({
     id: '',
     type: 2
 })
 /* 获取会员价格 */
 const VipPrice = ref([])
-const VipInfo = ref({})
+const VipInfo = ref(Viplist.value[0] || {})
+
+const vipPriceRes = await useApiSsr(
+    'user:vipPrice:' + VipActive.value,
+    '/api/getVipPrice',
+    { n_gid: VipActive.value }
+)
+if (vipPriceRes.code === 200) {
+    VipPrice.value = vipPriceRes.data
+    from.value.id = VipPrice.value[0]?.id || ''
+}
 
 const GetVipPrice = async () => {
     const res = await useApiFetch().post('/api/getVipPrice', {
@@ -178,9 +182,6 @@ const BuyVip = async () => {
         buying.value = false
     }
 }
-
-/* 仅在客户端挂载后请求，避免 SSR 阶段产生无意义的服务端请求 */
-onMounted(GetVipList)
 </script>
 
 <style lang="scss" scoped>

@@ -93,18 +93,27 @@ const getCurrentDate = () => {
 const checkInList = ref([])
 const currentMonthDayList = ref([]);
 
+/* 用签到记录推导当月日历与今日签到状态：预取与签到后刷新共用 */
+const applyCheckInList = (data) => {
+    checkInList.value = data
+    currentMonthDayList.value = getCurrentMonthDayList()
+    for (let a = 0; a < currentMonthDayList.value.days.length; a++) {
+        currentMonthDayList.value.days[a].Info = isCheckedInToday(currentMonthDayList.value.days[a].date)
+    }
+    isTodayCheckedIn.value = isCheckedInToday(getCurrentDate())
+}
+
 const getCheckInList = async () => {
     const res = await useApiFetch().post('/api/checkInList')
-    if (res.code === 200) {
-        checkInList.value = res.data
-        currentMonthDayList.value = getCurrentMonthDayList()
-        for (let a = 0; a < currentMonthDayList.value.days.length; a++) {
-            currentMonthDayList.value.days[a].Info = isCheckedInToday(currentMonthDayList.value.days[a].date)
-        }
-
-        isTodayCheckedIn.value = isCheckedInToday(getCurrentDate())
-    }
+    if (res.code === 200) applyCheckInList(res.data)
 }
+
+/* 首屏签到记录 + 今日/明日奖励：SSR 并发预取，客户端水合直接复用，省去 2 次往返 */
+const [checkInRes, rewardRes] = await Promise.all([
+    useApiSsr('user:checkInList', '/api/checkInList'),
+    useApiSsr('user:checkInReward', '/api/getCheckInReward'),
+])
+if (checkInRes.code === 200) applyCheckInList(checkInRes.data)
 
 
 /* 签到 /api/checkIn */
@@ -128,7 +137,7 @@ const checkIn = async () => {
 }
 
 /* 获取今日和明日奖励 /api/getCheckInReward */
-const checkInReward = ref({})
+const checkInReward = ref(rewardRes.code === 200 ? rewardRes.data : {})
 const getCheckInReward = async () => {
 
     const res = await useApiFetch().post('/api/getCheckInReward')
@@ -136,11 +145,6 @@ const getCheckInReward = async () => {
         checkInReward.value = res.data
     }
 }
-
-onMounted(() => {
-    getCheckInList()
-    getCheckInReward()
-})
 
 </script>
 

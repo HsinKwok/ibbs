@@ -73,24 +73,26 @@ const route = useRoute()
 /* 从 URL 参数 ?type= 初始化：1=积分账单 2=余额账单 3=提现记录，默认积分账单 */
 const initType = ['1', '2', '3'].includes(String(route.query.type)) ? String(route.query.type) : '1'
 
+/* 首屏只请求当前 Tab 的列表：SSR 预取，客户端水合直接复用，省去挂载后的补拉 */
+const billInitial = initType === '3'
+    ? null
+    : await useApiSsr('user:bill:' + initType, '/api/getuserbill', { page: 1, pagesize: 20, status: initType })
+const withdrawInitial = initType === '3'
+    ? await useApiSsr('user:withdraw', '/api/GetWithdrawList', { page: 1, pagesize: 20 })
+    : null
+
 const {
     list: billList,
     query: billQuery,
     loading: billLoading,
     load: billLoad,
-} = useList({ api: '/api/getuserbill', extraQuery: { status: initType }, autoLoad: false })
+} = useList({ api: '/api/getuserbill', extraQuery: { status: initType }, autoLoad: false, initial: billInitial })
 const {
     list: withdrawList,
     query: withdrawQuery,
     loading: withdrawLoading,
     load: withdrawLoad,
-} = useList({ api: '/api/GetWithdrawList', autoLoad: false })
-
-/* 仅加载当前 Tab 对应列表，避免多打一次无用请求 */
-onMounted(() => {
-    if (initType === '3') withdrawLoad()
-    else billLoad()
-})
+} = useList({ api: '/api/GetWithdrawList', autoLoad: false, initial: withdrawInitial })
 
 const columns = [
 

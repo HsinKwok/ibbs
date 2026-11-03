@@ -198,6 +198,13 @@ const Users = ref({})
 const GetUser = async () => {
     const id = props.data?.n_uid
     if (id === undefined || id === null || id === '') return
+    /* 列表接口已随帖带回作者信息（昵称/头像/勋章），直接使用：
+       避免每张卡片各发一次 GetUser 请求（列表 N+1） */
+    const embedded = props.data?.user
+    if (embedded) {
+        Users.value = embedded
+        return
+    }
     /* 先用缓存同步渲染，避免占位闪烁 */
     Users.value = Profile.users[String(id)] || {}
     try {

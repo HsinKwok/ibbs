@@ -73,26 +73,16 @@
 <script setup>
 import { Message } from '@arco-design/web-vue';
 
-// 最小提现金额
-const minAmount = ref(0.1)
+const UserInfo = useUserInfo()
+/* 复用布局发起的同一次 /api/myinfo（init 内部去重），不再重复请求；
+   取不到用户信息即视为登录态失效 */
+await UserInfo.init()
+if (!UserInfo.$state.UserInfo?.id) navigateTo('/login')
 
-/* 获取我的信息 */
-const userInfo = ref({})
-const getUserInfo = async () => {
-	try {
-		const res = await useApiFetch().post('/api/myinfo')
-		if (res.code == 200) {
-			userInfo.value = res.data
-			minAmount.value = res.data.VipInfo?.n_withdrawal_min ?? 0.1
-		} else {
-			navigateTo('/login')
-		}
-	} catch (error) {
-		Message.error('获取用户信息失败，请刷新页面重试')
-	}
-}
-/* 仅在客户端挂载后请求，避免 SSR 阶段产生无意义的服务端请求 */
-onMounted(getUserInfo)
+/* 用户信息（余额、手续费率等）直接取自 store，提现成功后再强制刷新 */
+const userInfo = computed(() => UserInfo.$state.UserInfo || {})
+// 最小提现金额：随会员等级配置变化，从同一份用户信息派生
+const minAmount = computed(() => userInfo.value.VipInfo?.n_withdrawal_min ?? 0.1)
 
 const form = ref({
 	amount: '',
@@ -116,26 +106,9 @@ const actualAmount = computed(() => {
 
 
 
-// 提现方式相关
-const withdrawMethods = ref([])
-
-/* 获取提现方式 */
-const getWithdrawMethods = async () => {
-	try {
-		const res = await useApiFetch().post('/api/GetWithdrawMethod')
-		if (res.code == 200) {
-			withdrawMethods.value = res.data
-			if (res.data && res.data.length) selectMethod(res.data[0])
-		} else {
-			Message.error('获取提现方式失败，请刷新页面重试')
-		}
-	} catch (error) {
-		console.error('获取提现方式失败:', error)
-
-	}
-}
-onMounted(getWithdrawMethods)
-
+// 提现方式相关：SSR 预取，客户端水合直接可用
+const withdrawMethodsRes = await useApiSsr('user:withdrawMethods', '/api/GetWithdrawMethod')
+const withdrawMethods = ref(withdrawMethodsRes.code === 200 ? withdrawMethodsRes.data : [])
 
 // 选择提现方式
 const selectMethod = (method) => {
@@ -143,6 +116,9 @@ const selectMethod = (method) => {
 	form.value.methodacctype = method.n_type
 	form.value.account = '' // 清空账号输入
 }
+
+/* 默认选中第一个提现方式 */
+if (withdrawMethods.value.length) selectMethod(withdrawMethods.value[0])
 
 // 金额输入处理
 const onAmountInput = (value) => {
@@ -196,8 +172,7 @@ const handleSubmit = async () => {
 
 		if (res.code === 200) {
 			Message.success('提现申请提交成功')
-			getUserInfo()
-			const UserInfo = useUserInfo()
+			/* 余额已变化：强制刷新 store，页面由 computed 自动更新 */
 			UserInfo.init(() => { }, true)
 			form.value.amount = ''
 		} else {

@@ -184,10 +184,13 @@ const timezoneOptions = [
 /* 当前生效的后台入口：留空或与根路径已有名称冲突时回退默认 /admin，与实际生效值保持一致 */
 const currentEntry = computed(() => adminBaseFromSegment(form.value.n_admin_path))
 
+/* 站点配置与其他配置页共用一份：切页不再整行重拉 */
+const { loadConfig, invalidate } = useAdminWebConfig()
+
 /* 获取配置信息 getwebinfo */
 const getwebinfo = async () => {
     try {
-        const res = await useApiFetch().post('/api/getweb')
+        const res = await loadConfig()
         if (res.code == 200) {
             const data = res.data || {}
             // 未配置推广内容时预填默认卡片内容，方便直接用编辑器修改
@@ -211,6 +214,7 @@ const editwebinfo = async () => {
     try {
         const res = await useApiFetch().post('/api/editweb', form.value)
         if (res.code == 200) {
+            invalidate()
             Message.success(res.msg)
         } else {
             Message.error(res.msg)
@@ -231,6 +235,7 @@ const saveAdminPath = async () => {
     try {
         const res = await useApiFetch().post('/api/editweb', form.value)
         if (res.code == 200) {
+            invalidate()
             Message.success(form.value.n_admin_path
                 ? `保存成功，后台入口已改为 ${currentEntry.value}，请使用新地址访问后台`
                 : '保存成功，后台入口已恢复为默认 /admin')

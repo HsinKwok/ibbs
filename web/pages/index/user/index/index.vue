@@ -99,28 +99,12 @@
 </template>
 
 <script setup>
-import { Message } from '@arco-design/web-vue';
 const UserInfo = useUserInfo()
 
-
-
-
-
-/* 论坛详情 */
-const TBBSInfo = ref({})
-
-const getinfo = async () => {
-    const res = await useApiFetch().post('/api/GetUser', {
-        id: 'me'
-    })
-    if (res.code === 200) {
-        TBBSInfo.value = res.data
-    }
-}
-onMounted(() => {
-    getinfo()
-})
-
+/* 我的统计（帖子/回复/粉丝/关注）：SSR 预取。
+   本页属 /user 私有路由（swr:false），服务端携带登录身份，客户端水合直接复用 */
+const info = await useApiSsr('user:me', '/api/GetUser', { id: 'me' })
+const TBBSInfo = ref(info.code === 200 ? info.data : {})
 </script>
 
 <style lang="scss" scoped>

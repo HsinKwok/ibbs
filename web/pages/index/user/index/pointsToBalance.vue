@@ -54,7 +54,14 @@
 <script setup>
 import { Message } from '@arco-design/web-vue';
 
-const userInfo = ref({})
+const UserInfo = useUserInfo()
+/* 复用布局发起的同一次 /api/myinfo（init 内部去重），不再重复请求；
+   取不到用户信息即视为登录态失效 */
+await UserInfo.init()
+if (!UserInfo.$state.UserInfo?.id) navigateTo('/login')
+
+/* 积分、余额、兑换比例均来自 store；兑换成功后再强制刷新 */
+const userInfo = computed(() => UserInfo.$state.UserInfo || {})
 const form = ref({ points: '' })
 const submitting = ref(false)
 
@@ -70,21 +77,6 @@ const actualBalance = computed(() => {
 	}
 	return (points / ratio.value).toFixed(2)
 })
-
-/* 获取我的信息 */
-const getUserInfo = async () => {
-	try {
-		const res = await useApiFetch().post('/api/myinfo')
-		if (res.code == 200) {
-			userInfo.value = res.data
-		} else {
-			navigateTo('/login')
-		}
-	} catch (error) {
-		Message.error('获取用户信息失败，请刷新页面重试')
-	}
-}
-onMounted(getUserInfo)
 
 /* 提交兑换 */
 const handleSubmit = async () => {
@@ -102,8 +94,8 @@ const handleSubmit = async () => {
 		if (res.code === 200) {
 			Message.success('兑换成功')
 			form.value.points = ''
-			getUserInfo()
-			useUserInfo().init(() => { }, true)
+			/* 积分与余额已变化：强制刷新 store，页面由 computed 自动更新 */
+			UserInfo.init(() => { }, true)
 		} else {
 			Message.error(res.msg || '兑换失败')
 		}

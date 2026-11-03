@@ -85,8 +85,14 @@ const router = useRouter()
 // 订单ID
 const orderId = route.params.id
 
+/* 首屏订单详情 + 支付方式：SSR 并发预取（本页属 /user 私有路由），客户端水合直接复用 */
+const [orderRes, payMethodsRes] = await Promise.all([
+    useApiSsr('user:order:' + orderId, '/api/GetOrder', { no: orderId }),
+    useApiSsr('user:payMethods:' + orderId, '/api/GetPayMethod', { no: orderId }),
+])
+
 // 订单详情
-const orderDetail = ref({})
+const orderDetail = ref(orderRes.code === 200 ? orderRes.data : {})
 
 // 选中的支付方式（空字符串表示未选择，需用户手动选择）
 const selectedPayMethod = ref('')
@@ -95,43 +101,7 @@ const selectedPayMethod = ref('')
 const paying = ref(false)
 
 // 支付方式选项
-const payMethods = ref([
-
-])
-/* 获取支付方式 /api/GetPayMethod */
-const getPayMethods = async () => {
-    try {
-        const res = await useApiFetch().post('/api/GetPayMethod',{
-            no:orderId
-        })
-        if (res.code === 200) {
-            payMethods.value = res.data
-            if (!res.data || res.data.length === 0) {
-                Message.warning('暂无可用的支付方式，请先在后台完成支付配置')
-            }
-        } else {
-            Message.error(res.msg || '获取支付方式失败')
-        }
-    } catch (error) {
-        console.error('获取支付方式失败:', error)
-        Message.error('获取支付方式失败')
-    }
-}
-const getOrderDetail = async () => {
-    try {
-        const res = await useApiFetch().post('/api/GetOrder', {
-            no: orderId
-        })
-        if (res.code === 200) {
-            orderDetail.value = res.data
-        } else {
-            Message.error(res.msg || '获取订单详情失败')
-        }
-    } catch (error) {
-        console.error('获取订单详情失败:', error)
-        Message.error('获取订单详情失败')
-    }
-}
+const payMethods = ref(payMethodsRes.code === 200 ? payMethodsRes.data : [])
 
 // 获取订单状态颜色
 const getStatusColor = (type) => {
@@ -227,12 +197,6 @@ const handlePayment = async () => {
         paying.value = false
     }
 }
-
-// 页面加载时获取订单详情与支付方式
-onMounted(() => {
-    getOrderDetail()
-    getPayMethods()
-})
 </script>
 
 <style lang="scss" scoped>

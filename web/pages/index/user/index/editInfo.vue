@@ -77,9 +77,14 @@
 
 <script setup>
 import { Message } from '@arco-design/web-vue';
-const form = ref({})
 const UserInfo = useUserInfo()
 const SiteConfig = useSiteConfig()
+
+/* 与布局共享同一次 /api/myinfo（init 内部去重）：既省掉本页的重复请求，
+   首屏也能直接带出资料；表单用副本，避免提交前编辑动作污染 store */
+await UserInfo.init()
+if (!UserInfo.$state.UserInfo?.id) navigateTo('/login')
+const form = ref({ ...UserInfo.$state.UserInfo })
 
 /* 上传功能总开关：仅当配置为 '0' 时关闭 */
 const uploadEnable = computed(() => SiteConfig.Config.n_upload_enable !== '0')
@@ -87,17 +92,7 @@ const uploadEnable = computed(() => SiteConfig.Config.n_upload_enable !== '0')
 /* 默认头像选择抽屉 */
 const avatarVisible = ref(false)
 
-UserInfo.init()
 SiteConfig.init()
-/* 获取用户信息 getuserinfo */
-const getuserinfo = async () => {
-    const res = await useApiFetch().post('/api/myinfo')
-    if (res.code == 200) {
-        form.value = res.data
-    } else {
-        Message.error(res.msg)
-    }
-}
 /* 编辑配置信息 editwebinfo */
 const editing = ref(false)
 const editwebinfo = async () => {
@@ -184,7 +179,6 @@ const restuserpass = async () => {
         })
         if (res.code == 200) {
             Message.success(res.msg)
-            getuserinfo()
         } else {
             Message.error(res.msg || '重置失败')
         }
@@ -194,9 +188,6 @@ const restuserpass = async () => {
         resetting.value = false
     }
 }
-onMounted(() => {
-    getuserinfo()
-})
 
 </script>
 

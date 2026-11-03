@@ -189,12 +189,12 @@ const loadUnreadCount = async () => {
 
 watch(() => UserInfo.$state.UserInfo.id, loadUnreadCount, { immediate: true })
 
-/* 从签到/消息页返回时刷新气泡与未读红点；
-   仅在进出这两个页面时刷新，避免每次路由跳转都产生 2 次未读请求 */
+/* 离开签到/消息页时刷新气泡与未读红点：进入时这两个页面自身已请求同一批数据，
+   父级再查会重复一遍，因此只在离开时刷新 */
 const route = useRoute()
 const isRelevantPath = (p) => !!p && (p.startsWith('/user/message') || p.startsWith('/user/activity/sign'))
 watch(() => route.path, (to, from) => {
-    if (!isRelevantPath(to) && !isRelevantPath(from)) return
+    if (!isRelevantPath(from) || isRelevantPath(to)) return
     if (notCheckedIn.value) checkTodaySignIn()
     loadUnreadCount()
 })

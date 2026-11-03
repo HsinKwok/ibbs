@@ -135,60 +135,42 @@ const SubmitForm = async () => {
     }
 }
 const CategoryList = ref([])
-const GetCategory = async () => {
-    try {
-        const res = await useApiFetch().post('/api/GetCategory')
-        if (res.code == 200) {
-            CategoryList.value = res.data
-        } else {
-            Message.error(res.msg || '获取分类列表失败')
-        }
-
-    } catch (error) {
-        Message.error(error.message)
-    }
-}
-
 /* 获取话题列表 */
 const TopicList = ref([])
-const GetTopicList = async () => {
-    try {
-        const res = await useApiFetch().post('/api/GetCategory', {
-            type: 2
-        })
-        if (res.code == 200) {
-            TopicList.value = res.data
-        } else {
-            Message.error(res.msg || '获取分类列表失败')
-        }
 
-    } catch (error) {
-        Message.error(error.message)
+/* type:'all' 一次返回帖子分类与话题列表，避免同一接口按 type 各请求一次 */
+const applyCategory = (res) => {
+    if (res?.code === 200) {
+        CategoryList.value = res.data?.CategoryList || []
+        TopicList.value = res.data?.TopicList || []
+    } else {
+        Message.error(res?.msg || '获取分类列表失败')
     }
 }
 
-onMounted(() => {
-    GetCategory()
-    GetTopicList()
-})
+/* 分类/话题选项与帖子详情互不依赖：并行预取，避免详情返回后才发起选项请求。
+   详情用 useApiSsr 缓存：GetThreads 会自增阅读量，若 SSR 与客户端 hydration 各请求一次
+   会重复自增并触发 hydration 不匹配 */
+const threadRequest = id == 'add'
+    ? null
+    : useApiSsr('GetAdminThreadsInfo' + id, '/api/GetThreads', { id })
 
-if (id == 'add') {
+const [categoryRes, threadInfo] = await Promise.all([
+    useApiSsr('admin:threadCategoryAll', '/api/GetCategory', { type: 'all' }),
+    threadRequest,
+])
+applyCategory(categoryRes)
 
-} else {
-    /* 用 useApiSsr 缓存：GetThreads 会自增阅读量，若 SSR 与客户端 hydration 各请求一次会重复自增并触发 hydration 不匹配 */
-    const res = await useApiSsr('GetAdminThreadsInfo' + id, '/api/GetThreads', {
-        id: id
-    })
-
-    if (res.code === 200 && res.data) {
-        form.value = res.data
+if (threadInfo) {
+    if (threadInfo.code === 200 && threadInfo.data) {
+        form.value = threadInfo.data
         /* a-input 的 modelValue 仅接受字符串，数据库取回的数值型字段需转成字符串，避免类型告警 */
         form.value.n_price = String(form.value.n_price ?? '')
         form.value.n_starts = String(form.value.n_starts ?? '')
         form.value.n_read = String(form.value.n_read ?? '')
         form.value.n_category = []
         form.value.n_topic = []
-        const categoryList = res.data.category || []
+        const categoryList = threadInfo.data.category || []
         for (let a in categoryList) {
             if (categoryList[a].n_type == '1') {
                 form.value.n_category.push(categoryList[a].id)

@@ -187,6 +187,21 @@ const WebInfo = ref({
     today: {},
     yesterday: {}
 })
+
+/* 趋势数据 */
+const trendData = ref([])
+const chartDays = ref(30)
+const trendChartRef = ref(null)
+let trendChart = null
+
+/* 首屏数据：统计与趋势互不依赖，SSR 并行预取，HTML 首屏即带真实数据，水合后不再重复请求 */
+const [statRes, trendRes] = await Promise.all([
+    useApiSsr('admin:indexStatistics', '/api/GetIndexStatistics'),
+    useApiSsr('admin:indexTrend:' + chartDays.value, '/api/GetComprehensiveTrend', { days: chartDays.value }),
+])
+if (statRes.code === 200) WebInfo.value = statRes.data
+if (trendRes.code === 200) trendData.value = trendRes.data
+
 const GetWebInfo = async () => {
     const res = await useApiFetch().post('/api/GetIndexStatistics')
     if (res.code === 200) {
@@ -195,12 +210,6 @@ const GetWebInfo = async () => {
         Message.error(res.msg)
     }
 }
-
-/* 趋势数据 */
-const trendData = ref([])
-const chartDays = ref(30)
-const trendChartRef = ref(null)
-let trendChart = null
 
 const GetTrend = async (days = 30) => {
     try {
@@ -400,8 +409,10 @@ const handleResize = () => {
 }
 
 onMounted(() => {
-    GetWebInfo()
-    GetTrend(chartDays.value)
+    /* 预取成功则直接用首屏数据绘图，失败才回退为客户端补拉 */
+    if (statRes.code !== 200) GetWebInfo()
+    if (trendRes.code !== 200) GetTrend(chartDays.value)
+    else initChart()
     window.addEventListener('resize', handleResize)
 })
 

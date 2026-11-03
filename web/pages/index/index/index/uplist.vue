@@ -46,11 +46,22 @@
 </template>
 
 <script setup>
-/* 主列表：热门UP主，复用 useList */
+/* 主列表：热门UP主，复用 useList。
+   首屏在服务端预取（匿名），客户端不再重复请求；登录用户下方会补拉一次以拿到正确的关注态 */
+const UserInfo = useUserInfo()
+const ListQuery = { pagesize: 9, search: '' }
+const initial = await useApiSsr('uplist:users:1', '/api/GetUser', { page: 1, ...ListQuery })
 const { list, query, loading, load } = useList({
     api: '/api/GetUser',
-    extraQuery: { pagesize: 9, search: '' },
+    extraQuery: ListQuery,
+    initial,
 })
+
+/* 关注态（isLiked）因人而异：SSR 只能匿名渲染，登录后若首屏数据不带 isLiked 则重拉一次校正。
+   客户端导航进来的数据本就带登录态（有 isLiked 字段），不会再发第二次请求 */
+watch(() => UserInfo.$state.UserInfo?.id, (uid) => {
+    if (uid && list.value.some((item) => item && !('isLiked' in item))) load()
+}, { immediate: true })
 
 /* 搜索后回到第一页再查询，避免停留在过滤前的越界页码导致空列表 */
 const search = () => {

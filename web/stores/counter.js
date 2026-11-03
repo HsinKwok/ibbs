@@ -58,6 +58,12 @@ export const useUserInfo = defineStore('UserInfo', {
     },
     /* force=true 时强制重新拉取（登录 / 资料变更 / 支付 / 提现等场景） */
     async init(CallBack = () => { }, force = false) {
+      /* 公开页 SSR 不带身份（见 useApiFetch 的 isSsrPublicRoute）：直接跳过请求，
+         避免整份个人资料进入会被所有访客复用的页面缓存；客户端挂载后会再次调用本方法补拉 */
+      if (import.meta.server && isSsrPublicRoute()) {
+        CallBack(this.UserInfo)
+        return this.UserInfo
+      }
       /* 已加载且非强制刷新：直接复用缓存，避免每处调用重复请求 /api/myinfo */
       if (!force && this.loaded) {
         CallBack(this.UserInfo)

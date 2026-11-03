@@ -38,9 +38,13 @@ const id = route.params.id
 
 
 const Info = ref({})
-const res = await useApiSsr('GetCategoryInfo' + id, '/api/GetCategory', {
-    id: id
-})
+/* 板块信息与首屏帖子互不依赖，合并为一次并发预取，省掉一段串行往返。
+   列表内容与登录身份无关，可随 HTML 下发（客户端不再重复请求） */
+const ListQuery = { pagesize: 10, cid: id }
+const [res, initial] = await Promise.all([
+    useApiSsr('GetCategoryInfo' + id, '/api/GetCategory', { id: id }),
+    useApiSsr('plate:threads:' + id, '/api/GetThreads', { page: 1, ...ListQuery })
+])
 if (res.code === 200) {
     Info.value = res.data
 } else {
@@ -50,9 +54,8 @@ if (res.code === 200) {
 /* 主列表：板块帖子，复用 useList */
 const { list, query, load } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, cid: id },
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial,
 })
 
 /* 右侧栏：热门话题，复用 useSidebar */

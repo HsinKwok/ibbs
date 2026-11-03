@@ -202,19 +202,25 @@ const SiteConfig = useSiteConfig()
 const adminToken = useCookie('AToken')
 const isAdmin = computed(() => !!adminToken.value && UserInfo.$state.UserInfo.VipInfo?.n_builtin == 1)
 
+/* 首屏数据（消息 / 公告 / 未读数 / 会话）统一在 SSR 并发预取：
+   本页属 /user 私有路由，按请求渲染不共享缓存；客户端水合直接复用，省去 5 次往返 */
+const [msgInitial, noticeInitial, unreadRes, chatUnreadRes, convRes] = await Promise.all([
+    useApiSsr('user:msgs', '/api/GetMsgs', { page: 1, pagesize: 20 }),
+    useApiSsr('user:notices', '/api/noticeList', { page: 1, pagesize: 20 }),
+    useApiSsr('user:unread', '/api/GetUnreadCount'),
+    useApiSsr('user:chatUnread', '/api/GetChatUnread'),
+    useApiSsr('user:conversations', '/api/GetConversations'),
+])
+
 /* 系统消息 */
 const { list: msgList, query: msgQuery, load: loadMsgs } = useList({
     api: '/api/GetMsgs',
     extraQuery: { pagesize: 20 },
+    initial: msgInitial,
 })
 
 const expanded = ref(0)
-const unread = ref(0)
-
-const loadUnread = async () => {
-    const res = await useApiFetch().post('/api/GetUnreadCount')
-    if (res.code === 200) unread.value = res.data.total
-}
+const unread = ref(unreadRes.code === 200 ? unreadRes.data.total : 0)
 
 const toggleMsg = async (item) => {
     if (expanded.value === item.id) {
@@ -243,6 +249,7 @@ const readAll = async () => {
 const { list: noticeList, query: noticeQuery, load: loadNotices } = useList({
     api: '/api/noticeList',
     extraQuery: { pagesize: 20 },
+    initial: noticeInitial,
 })
 
 const noticeExpanded = ref(0)
@@ -284,8 +291,8 @@ const delNotice = async (id) => {
 /* 私信 */
 const route = useRoute()
 const myId = computed(() => UserInfo.$state.UserInfo.id)
-const conversations = ref([])
-const chatUnread = ref(0)
+const conversations = ref(convRes.code === 200 ? convRes.data || [] : [])
+const chatUnread = ref(chatUnreadRes.code === 200 ? chatUnreadRes.data.total : 0)
 const chatPeer = ref(null)
 const chatMsgs = ref([])
 const chatInput = ref('')
@@ -423,9 +430,6 @@ watch(activeTab, (tab) => {
 
 onMounted(async () => {
     document.addEventListener('visibilitychange', onVisibilityChange)
-    loadUnread()
-    loadChatUnread()
-    await loadConversations()
     /* 从用户主页带 ?to=<uid> 进入：自动打开对应会话 */
     const to = route.query.to
     if (to) {

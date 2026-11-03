@@ -113,8 +113,11 @@ watch(visible, (v) => { if (!v) loadCategoryOptions() })
 const descVisible = ref(false)
 const descForm = ref({ id: 1, n_market_desc: '' })
 
+/* 站点配置与其他配置页共用一份：不必为一行说明整行重拉 */
+const { loadConfig, invalidate } = useAdminWebConfig()
+
 const openDesc = async () => {
-    const res = await useApiFetch().post('/api/getweb')
+    const res = await loadConfig()
     if (res.code === 200) {
         descForm.value = { id: res.data?.id, n_market_desc: res.data?.n_market_desc ?? '' }
         descVisible.value = true
@@ -129,6 +132,7 @@ const saveDesc = async () => {
         n_market_desc: descForm.value.n_market_desc,
     })
     if (res.code === 200) {
+        invalidate()
         Message.success(res.msg)
         descVisible.value = false
     } else {

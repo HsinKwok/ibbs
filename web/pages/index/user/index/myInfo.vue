@@ -98,26 +98,27 @@ const UserInfo = useUserInfo()
 /* 论坛详情 */
 const TBBSInfo = ref({})
 
-const getinfo = async () => {
-    const res = await useApiFetch().post('/api/GetUser', {
-        id: 'me'
-    })
-    if (res.code === 200) {
-        TBBSInfo.value = res.data
-    }
-}
-
 const CommentLoading = ref(false)
 const FollowerLoading = ref(false)
 const FollowingLoading = ref(false)
 
 
-/* 主列表：我的帖子，复用 useList */
+/* 我的资料与首屏「我的帖子」互不依赖，合并为一次并发预取。
+   /user/** 为按请求渲染（swr:false）且 SSR 携带登录态，个人数据不会进入共享缓存 */
+const ListQuery = { pagesize: 10, ismy: 1 }
+const [res, initial] = await Promise.all([
+    useApiSsr('myInfo:user', '/api/GetUser', { id: 'me' }),
+    useApiSsr('myInfo:threads:1', '/api/GetThreads', { page: 1, ...ListQuery })
+])
+if (res.code === 200) {
+    TBBSInfo.value = res.data
+}
+
+/* 主列表：我的帖子，复用 useList（initial 来自上方并发预取） */
 const { list, query, loading, load } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, ismy: 1 },
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial,
 })
 
 /* 获取评论列表 */
@@ -194,10 +195,7 @@ const GetFollowingList = async () => {
         FollowingLoading.value = false
     }
 }
-onMounted(() => {
-    /* 首屏仅请求 Tab 标签计数；其余列表按需懒加载，避免并发请求不可见 Tab 的数据 */
-    getinfo()
-})
+/* 首屏资料与帖子已由 SSR 预取；其余 Tab 列表按需懒加载，避免并发请求不可见 Tab 的数据 */
 
 
 /* 查看页面 */

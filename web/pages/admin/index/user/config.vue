@@ -49,10 +49,13 @@
 import { Message } from '@arco-design/web-vue';
 const form = ref({})
 
+/* 站点配置与其他配置页共用一份：切页不再整行重拉 */
+const { loadConfig, invalidate } = useAdminWebConfig()
+
 /* 获取配置信息 getwebinfo */
 const getwebinfo = async () => {
     try {
-        const res = await useApiFetch().post('/api/getweb')
+        const res = await loadConfig()
         if (res.code == 200) {
             form.value = res.data
         } else {
@@ -67,6 +70,7 @@ const editwebinfo = async () => {
     try {
         const res = await useApiFetch().post('/api/editweb', form.value)
         if (res.code == 200) {
+            invalidate()
             Message.success(res.msg)
         } else {
             Message.error(res.msg)

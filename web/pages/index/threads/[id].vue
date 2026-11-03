@@ -136,7 +136,8 @@
         <div class="Right">
 
             <div class="UserInfo">
-                <UserBox :id="Info.n_uid"></UserBox>
+                <!-- 详情接口已带回作者昵称/头像：SSR 直接渲染，统计与关注态由客户端补拉 -->
+                <UserBox :id="Info.n_uid" :info="Info.user"></UserBox>
             </div>
             <div class="NavBar">
                 <NeedStar></NeedStar>
@@ -208,7 +209,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { Message } from '@arco-design/web-vue';
 import { formatNumber } from '@/utils/format'
 const route = useRoute()
@@ -218,14 +219,40 @@ const id = route.params.id
 const SiteConfig = useSiteConfig()
 
 const Info = ref({})
-const res = await useApiSsr('GetThreadsInfo' + id, '/api/GetThreads', {
-    id: id
-})
+/* 帖子详情与首屏评论合并为一次并发预取：
+   公开页 SSR 一律匿名（页面会进 SWR 共享缓存），这里只取公开数据；
+   isLiked / IsBuy / 已购资源等个性化字段由下方 watch 在客户端补拉 */
+const [res, comments] = await Promise.all([
+    useApiSsr('GetThreadsInfo' + id, '/api/GetThreads', {
+        id: id
+    }),
+    useApiSsr('GetComments:' + id, '/api/GetComments', {
+        page: 1,
+        pagesize: 20,
+        id: id
+    })
+])
 if (res.code === 200) {
     Info.value = res.data
 } else {
     navigateTo('/threads/404')
 }
+
+/* 仅拉取个性化状态（isLiked / IsBuy / 解锁后的正文）并合并到现有详情：
+   避免为几个状态字段重复下载整份帖子正文；noread=1 避免重复累计阅读量 */
+const refreshStatus = async () => {
+    const data = await useApiFetch().post('/api/GetThreads', { id: id, noread: 1, statusOnly: 1 })
+    if (data?.code === 200 && data.data) {
+        Info.value = { ...Info.value, ...data.data }
+    }
+    return data
+}
+
+/* 登录后补拉一次带身份的状态；用户信息在客户端才拿得到，匿名访客不会触发（uid 为空直接返回） */
+watch(() => UserInfo.$state.UserInfo?.id, async (uid) => {
+    if (!uid) return
+    await refreshStatus()
+}, { immediate: true })
 useSeoSet({
     title: Info.value.n_name + '-' + SiteConfig.$state.Config.n_web_title,
     description: Info.value.n_profile
@@ -311,6 +338,11 @@ const GetCommentsFrom = ref({
     id: id
 })
 const CommentList = ref([])
+/* 首屏评论已随详情一起预取，直接回填；后续翻页 / 评论成功后仍走本函数刷新 */
+if (comments && comments.code === 200) {
+    CommentList.value = comments.data || []
+    GetCommentsFrom.value.total = comments.total
+}
 const GetCommentList = async () => {
     try {
         loading.value = true
@@ -325,9 +357,6 @@ const GetCommentList = async () => {
         loading.value = false
     }
 }
-onMounted(() => {
-    GetCommentList()
-})
 
 
 /* 点赞帖子 LikeThreads */
@@ -341,15 +370,9 @@ const LikeThreads = async () => {
         })
         if (res.code == 200) {
             Message.success(res.msg)
-            /* 点赞后需拿到最新数据（含是否已赞状态）；useApiSsr 的 key 与首屏一致会命中缓存，
-               这里直接用 useApiFetch 重新请求，避免读到旧数据。noread=1 表示仅刷新、不自增阅读量 */
-            const data = await useApiFetch().post('/api/GetThreads', {
-                id: id,
-                noread: 1
-            })
-            if (data.code === 200) {
-                Info.value = data.data
-            } else {
+            /* 点赞后只需刷新状态字段；useApiSsr 的 key 与首屏一致会命中缓存，这里直接走接口 */
+            const data = await refreshStatus()
+            if (data?.code !== 200) {
                 navigateTo('/threads/404')
             }
         } else if (res.code == 401) {

@@ -76,14 +76,15 @@
 </template>
 
 <script setup>
-/* 主列表：视频图片帖子，复用 useList（视频/图片筛选在 load 前写入 query） */
+/* 主列表：视频图片帖子，复用 useList（首屏默认「只看视频」）。
+   首屏在服务端预取（列表内容与登录身份无关），随 HTML 下发，客户端不再重复请求 */
 const video = ref('1')
+const ListQuery = { pagesize: 10, search: '', sort: 'id', video: 1 }
+const initial = await useApiSsr('images:threads:1', '/api/GetThreads', { page: 1, ...ListQuery })
 const { list, query, loading, load: loadList } = useList({
     api: '/api/GetThreads',
-    extraQuery: { pagesize: 10, search: '', sort: 'id' },
-    autoLoad: false,
-    /* 加载后批量预取作者信息，避免每个 ItemA 各自发起请求 */
-    onLoad: (data) => useUserProfile().prefetchUsers(data.map((i) => i.n_uid)),
+    extraQuery: ListQuery,
+    initial,
 })
 
 const load = () => {
@@ -107,8 +108,6 @@ const search = () => {
     query.value.page = 1
     load()
 }
-
-onMounted(load)
 
 /* 右侧栏：热门圈子 + 热门话题，复用 useSidebar */
 const { CategoryList, TopicList } = useSidebar()

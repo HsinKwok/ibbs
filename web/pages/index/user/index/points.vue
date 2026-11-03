@@ -51,19 +51,14 @@
 <script setup>
 const UserInfo = useUserInfo()
 
-/* 获取我的信息（兼作登录守卫） */
-const getUserInfo = async () => {
-	const res = await useApiFetch().post('/api/myinfo')
-	if (res.code != 200) {
-		navigateTo('/login')
-	}
-}
-/* 仅在客户端挂载后请求，避免 SSR 阶段产生无意义的服务端请求 */
-onMounted(getUserInfo)
+/* 本页属 /user 私有路由：await 布局已发起的 init()（同一 promise 自动去重），
+   既保证首屏积分有值，又不再额外请求一次 /api/myinfo；取不到用户信息即视为登录态失效 */
+await UserInfo.init()
+if (!UserInfo.$state.UserInfo?.id) navigateTo('/login')
 
-
-/* 获取活动列表 /api/getActivity */
-const ActivityList = ref([])
+/* 获取活动列表 /api/getActivity：SSR 预取，客户端水合直接复用 */
+const activity = await useApiSsr('user:activity', '/api/getActivity')
+const ActivityList = ref(activity.code === 200 ? activity.data : [])
 
 /* 活动跳转路径白名单：仅允许站内相对路径，避免 n_path 被配置为外部地址时跳离本站 */
 const safePath = (target) => {
@@ -71,15 +66,6 @@ const safePath = (target) => {
 	if (!target.startsWith('/') || target.startsWith('//')) return '/'
 	return target
 }
-const getActivity = async () => {
-	const res = await useApiFetch().post('/api/getActivity')
-	if (res.code === 200) {
-		ActivityList.value = res.data
-	}
-}
-onMounted(getActivity)
-
-
 </script>
 
 <style lang="scss" scoped>

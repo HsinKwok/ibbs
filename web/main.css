@@ -96,3 +96,32 @@ button {
   bottom: auto !important;
   transform: translateY(-50%);
 }
+
+/* Arco 图标基础样式：改为按需引入组件样式后，全局 arco.css 不再加载，
+   图标组件的尺寸/对齐规则需要在这里补上（等同原 arco.css 中的 .arco-icon 规则） */
+.arco-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  color: inherit;
+  font-style: normal;
+  vertical-align: -2px;
+  outline: none;
+  stroke: currentColor;
+}
+
+.arco-icon-loading,
+.arco-icon-spin {
+  animation: arco-loading-circle 1s infinite cubic-bezier(0, 0, 1, 1);
+}
+
+@keyframes arco-loading-circle {
+  0% {
+    transform: rotate(0);
+  }
+
+  100% {
+    transform: rotate(360deg);
+  }
+}
+

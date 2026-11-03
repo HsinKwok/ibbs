@@ -17,11 +17,12 @@ export default defineNuxtConfig({
     port: 3000,
   },
   css: [
-    '@arco-design/web-vue/dist/arco.css',  // Arco Design 官方样式
-    '~/main.css',  // 自定义样式
+    /* Arco 组件样式由 ArcoResolver({ sideEffect: true }) 按需引入，
+       不再全量加载 457KB 的 arco.css；命式 API（Message）的样式在 plugins/arco.ts 中补引入 */
+    '~/main.css',  // 自定义样式（含 Arco 图标基础样式）
   ],
   modules: ['@pinia/nuxt'],
-  /* 插件由 Nuxt 自动扫描 plugins/ 目录注册（arco 图标等），无需显式列出避免重复注册 */
+  /* 插件由 Nuxt 自动扫描 plugins/ 目录注册（arco 样式补丁），无需显式列出避免重复注册 */
   /* 生产构建目标：Cloudflare Workers（SSR）。构建产物输出到 .output/，
      部署时由 nitro 基于 web/wrangler.jsonc 生成 .output/server/wrangler.json */
   nitro: {
@@ -56,8 +57,9 @@ export default defineNuxtConfig({
       })
     },
   },
-  /* 边缘缓存：前台公开页内容数据均在 onMounted 拉取，SSR 产物是匿名壳，
-     用 SWR 缓存可显著减少 Worker 渲染次数；用户中心 / 登录页不做缓存。
+  /* 边缘缓存：前台公开页的 SSR 一律按匿名身份渲染（见 composables/useApiFetch.js），
+     HTML 与 payload 不含任何个性化数据，因此可安全用 SWR 缓存，显著减少 Worker 渲染次数；
+     用户中心 / 登录 / 编辑页需要登录态，不做缓存。
      注意：pages/index.vue 是根级父布局，前台页面的实际路径都挂在根下（如 /class、/threads/1） */
   routeRules: {
     '/_nuxt/**': {
@@ -65,16 +67,16 @@ export default defineNuxtConfig({
     },
     '/': { swr: 60 },
     '/class': { swr: 60 },
-    '/follow': { swr: 60 },
+    '/follow': { swr: false },
     '/images': { swr: 60 },
     '/market': { swr: 60 },
     '/uplist': { swr: 60 },
     '/threads/**': { swr: 60 },
     '/plate/**': { swr: 60 },
     '/topic/**': { swr: 60 },
-    '/threadInfo/**': { swr: 60 },
     '/upinfo/**': { swr: 60 },
     '/user/**': { swr: false },
+    '/threadInfo/**': { swr: false },
     '/login': { swr: false },
   },
   runtimeConfig: {
